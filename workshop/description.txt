@@ -1,0 +1,93 @@
+[h1][Z-CITY] LVS SUPPORT[/h1]
+[b]Author: Oppai[/b]
+
+Compatibility layer so [b]LVS[/b] works with Z-City systems: fake/ragdoll, organism, camera, TPIK, weapons in seats.
+
+Glide is not touched. Z-City files are not patched. Works on the whole LVS framework, not on a single pack.
+
+[h2]Required[/h2]
+[list]
+[*] Z-City
+[*] [LVS] - Framework
+[*] any LVS car / helicopter pack
+[/list]
+
+Tested first with [b][LVS] Vehicles from Snowdrop escape Swelter[/b] and [b][LVS] - Helicopters[/b].
+
+[h2]Cars (Snowdrop, LVS Cars, any lvs_base_wheeldrive)[/h2]
+[list]
+[*] Enter → hg.Fake, ragdoll welded to the LVS chassis
+[*] Z-City camera
+[*] Hands on the wheel if the model has a steering bone
+[*] Weapons in the cabin. R reloads; engine toggle only with empty hands
+[*] Two-handed guns slow steering and throttle
+[*] Passing out does not eject you; driver inputs are idled
+[*] Hard crash can throw you out; crash/explosion hits the organism
+[*] Loose ragdolls and small props stay in the cargo until an LVS door is open
+[*] Climb into the rear cargo of a van without a seat (open the rear door, then E)
+[*] Bullets go through glass / open doorways into the cabin
+[*] Gunner/turret seats use LVS aim camera; the driver keeps Z-City camera
+[*] Burning / wrecked engine: heat soaks the organism; a dead engine will not start
+[*] Loose bodies stay lying in the cargo (van etc.) while doors are closed
+[/list]
+
+[h2]Tanks / closed vehicles[/h2]
+[list]
+[*] LVS hatch / tank camera
+[*] Fake ragdoll stays at the hatch/seat (hull no longer shoves the body outside)
+[*] Works with zc_lvs_fake 0 — tank aim is not zeroed
+[/list]
+
+[h2]Helicopters[/h2]
+[list]
+[*] Fake ragdoll in the seat
+[*] LVS camera and mouse-aim from eye height
+[*] Alt-look: head follows the camera, LVS reticle stays on the last aim
+[*] Seat switch at speed no longer yeets you while the camera stays in the cabin
+[*] Organism still applies
+[/list]
+
+[h2]Planes / fighters[/h2]
+[list]
+[*] Own LVS flight camera (not the helicopter look-cam)
+[*] Landing-gear rumble on takeoff is not a crash — you stay in the seat
+[*] Mouse-aim flies the plane; direct-input is not overwritten
+[/list]
+
+[h2]Controls[/h2]
+[list]
+[*] [b]1–0[/b] — vehicle weapons
+[*] [b]Alt + 1–0[/b] — change seat (Alt+1 as driver = lock)
+[*] [b]E[/b] — exit
+[*] [b]R[/b] — reload if you hold a gun; engine on/off only with hands
+[*] Shift / Alt while seated no longer trigger Z-City climbing / eject
+[/list]
+
+[h2]Console[/h2]
+[code]
+zc_lvs_enabled 1
+zc_lvs_fake 1
+zc_lvs_air_fake 1
+zc_lvs_air_camera 1
+zc_lvs_crash_damage 1
+zc_lvs_explode_damage 1
+zc_lvs_crash_eject 1
+zc_lvs_pen 1
+zc_lvs_shrapnel 1
+[/code]
+
+On map load you should see:
+[code]
+[Z-CITY LVS SUPPORT] loaded v2.2.26 by Oppai
+[/code]
+
+[h2]If the character still glitches[/h2]
+[olist]
+[*] Check the loaded line in console
+[*] LVS Framework must be enabled
+[*] Do not add LVS classes to Z-City Vehicle ragdoll blacklist
+[*] Helicopter camera is LVS on purpose
+[*] After updating: changelevel, not only retry
+[/olist]
+
+[i]Author: Oppai[/i]

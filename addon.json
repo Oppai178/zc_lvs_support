@@ -1,0 +1,13 @@
+{
+	"title": "[Z-CITY] LVS SUPPORT",
+	"author": "Oppai",
+	"type": "vehicle",
+	"tags": ["roleplay", "realism"],
+	"ignore": [
+		"*.md",
+		"*.txt",
+		".git/*",
+		"*.psd",
+		"workshop/*"
+	]
+}

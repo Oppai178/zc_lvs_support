@@ -1,0 +1,4 @@
+*.gma
+*.rar
+*.zip
+.DS_Store
