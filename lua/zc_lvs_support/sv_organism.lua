@@ -1,8 +1,42 @@
--- [Z-CITY] LVS SUPPORT
--- Author: Oppai
+--[[
+	[Z-CITY] LVS SUPPORT — УРОН ПО ЭКИПАЖУ (сервер)
+	Author: Oppai
+
+	Задача: всё, что происходит с техникой, должно доходить до организма
+	игрока. В LVS урон идёт по HP корпуса, а Z-City считает кости, кровь
+	и органы — этот модуль переводит одно в другое.
+
+	ЧТО СЧИТАЕМ
+	  ДТП        — по delta-v (изменение скорости за тик), а не по
+	               DMG_CRUSH: LVS шлёт CRUSH только при VelDif > 1000,
+	               что на автомобильных скоростях почти не бывает.
+	  HE-снаряды — LVS:BlastDamage превращает DMG_BLAST в DMG_SONIC,
+	               поэтому ловим оба типа. Броня режет урон закрытым
+	               корпусам, открытые получают полностью + контузия.
+	  Пробитие   — пули через стекло и открытые двери в салон.
+	  Калибр     — Penetration оружия против класса брони (ArmorNeed).
+	  Топливо    — попадание в бак: утечка и шанс возгорания.
+	  Пожар      — горящая машина греет экипаж; в закрытой броней
+	               добавляется дым в лёгкие.
+	  Взрыв      — LVS.OnVehicleDestroyed: урон + шрапнель.
+
+	ГЛАВНАЯ ЛОВУШКА Z-CITY (из-за неё «разрывало на части»)
+	  ZC считает урон конечности так (organism/tier_1/sv_input.lua):
+	      lend = max(0.1, расстояние(тело, точкаУрона))
+	      damageStack = урон * (200 / lend)
+	  Если точка урона ВНУТРИ тела, lend = 0.1 и множитель = 2000x.
+	  Тогда ZC ампутирует сразу все конечности. Поэтому позиция урона
+	  ОБЯЗАНА быть вне тела — см. safeBlastPos ниже. Это не косметика,
+	  это разница между «ушиб» и «разорвало».
+
+	Порядок: сначала диагностика (dmg_probe), потом защита от CRUSH
+	собственным корпусом, потом остальные хуки.
+]]
 
 ZC_LVS = ZC_LVS or {}
 
+-- Куда писать урон: в фейк-регдолл, если он есть (там организм), иначе
+-- в самого игрока. ZC переносит урон с регдолла на игрока сам.
 local function organismTarget(ply)
 	if not IsValid(ply) then return end
 	if IsValid(ply.FakeRagdoll) then
@@ -104,6 +138,38 @@ function ZC_LVS.SeatHitPos(ply, veh)
 	return IsValid(ply) and ply:EyePos() or nil
 end
 
+-- Точка BLAST-урона НИКОГДА не должна быть внутри тела жертвы.
+-- Z-City (organism/tier_1/sv_input.lua:933) считает:
+--   lend = max(0.1, расстояние(тело, точкаУрона))
+--   damageStack = урон * (200 / lend)
+-- Точка В теле -> lend = 0.1 -> множитель 2000x -> ампутируются все
+-- конечности сразу («разорвало на части»). Выталкиваем точку наружу
+-- вдоль луча корпус->место: при lend >= 60 юнитов множитель <= 3.3x.
+-- Настоящая точка попадания в корпус уже далека от тела и не трогается.
+local MIN_BLAST_DIST = 60
+local function safeBlastPos(ply, target, veh, pos)
+	local origin = target:GetPos()
+	if not isvector(origin) then return pos end
+	if not isvector(pos) then
+		-- Точку не передали (авиа/танк путь отдавал nil): ставим её ВНЕ
+		-- тела по направлению корпус->место, а не в глаза или таз.
+		local dir = IsValid(veh) and (origin - veh:GetPos()) or vector_up
+		if dir:LengthSqr() < 1 then dir = vector_up end
+		return origin + dir:GetNormalized() * MIN_BLAST_DIST
+	end
+	local delta = origin - pos
+	local len = delta:Length()
+	if len >= MIN_BLAST_DIST then return pos end
+	-- Точка внутри/рядом с телом: отодвигаем по тому же лучу.
+	-- При len==0 нормализация дала бы NaN, поэтому берём направление
+	-- от корпуса.
+	local dir = len > 1 and delta / len or (IsValid(veh) and (origin - veh:GetPos()) or vector_up)
+	if dir:LengthSqr() < 1 then dir = vector_up end
+	return origin - dir:GetNormalized() * MIN_BLAST_DIST
+end
+
+-- Единая точка нанесения урона экипажу. Все пути (ДТП, HE, взрыв,
+-- пожар) идут через неё, чтобы позиция и тип урона были согласованы.
 local function hurtOccupants(veh, amount, dmgType, attacker, inflictor, pos, knockOut)
 	if not IsValid(veh) then return end
 
@@ -123,7 +189,7 @@ local function hurtOccupants(veh, amount, dmgType, attacker, inflictor, pos, kno
 		dmg:SetAttacker(attacker)
 		dmg:SetInflictor(inflictor)
 		dmg:SetDamageType(dmgType or DMG_BLAST)
-		dmg:SetDamagePosition(pos or ZC_LVS.SeatHitPos(ply, veh) or ply:EyePos())
+		dmg:SetDamagePosition(safeBlastPos(ply, target, veh, pos))
 		dmg:SetDamageForce((ply:GetPos() - veh:GetPos()):GetNormalized() * amount * 40)
 		target:TakeDamageInfo(dmg)
 		if knockOut and ply.organism and ply:Alive() and not ply.organism.otrub then
@@ -174,6 +240,37 @@ end)
 -- between them and util.BlastDamageInfo). ZC's homigrad-damage hook then
 -- re-posts it onto the fake ragdoll, so BOTH shapes arrive here.
 -- Closed armor should soak part of it; open hulls take the full charge.
+-- Resolve the LVS origin of the hit. LVS gunner entities carry
+-- LVS_GUNNER but NOT .LVS, and live two parents deep:
+--   lvs_base_gunner -> prisoner_pod -> chassis (the only .LVS = true).
+-- The old code walked a single parent, so HE from every turret/mounted
+-- gun missed this hook entirely and armor never soaked anything.
+local function lvsRoot(ent)
+	for _ = 1, 4 do
+		if not IsValid(ent) then return NULL end
+		if ent.LVS then return ent end
+		if ent.LVS_GUNNER or ent:GetClass() == "lvs_base_gunner" then
+			ent = ent:GetParent()
+			continue
+		end
+		if ent.lvsProjectile then
+			-- Bomb / missile: the machine that fired it is the owner.
+			local owner = ent.GetOwner and ent:GetOwner()
+			if IsValid(owner) then
+				ent = owner
+				continue
+			end
+		end
+		local par = ent.GetParent and ent:GetParent()
+		if IsValid(par) then
+			ent = par
+			continue
+		end
+		return NULL
+	end
+	return IsValid(ent) and ent.LVS and ent or NULL
+end
+
 hook.Add("EntityTakeDamage", "zc_lvs_he_armor", function(ent, dmginfo)
 	if not ZC_LVS.Enabled() then return end
 	if ZC_LVS._hurtingOccupants then return end
@@ -181,16 +278,11 @@ hook.Add("EntityTakeDamage", "zc_lvs_he_armor", function(ent, dmginfo)
 	-- LVS HE only: the inflictor/attacker must be part of LVS (gun shell,
 	-- bomb) or the vehicle itself. Z-City grenades keep full damage.
 	local src = dmginfo:GetInflictor()
-	if not IsValid(src) or not src.LVS then
-		local atk = dmginfo:GetAttacker()
-		if IsValid(atk) and atk.LVS then
-			src = atk
-		elseif IsValid(src) and isfunction(src.GetParent) then
-			local par = src:GetParent()
-			if IsValid(par) and par.LVS then src = par end
-		end
+	src = lvsRoot(src)
+	if not IsValid(src) then
+		src = lvsRoot(dmginfo:GetAttacker())
 	end
-	if not IsValid(src) or not src.LVS then return end
+	if not IsValid(src) then return end
 
 	local ply, veh
 	if ent:IsPlayer() then
@@ -250,22 +342,21 @@ hook.Add("Tick", "zc_lvs_plane_dv", function()
 		if not crashEnabled then continue end
 		if ZC_LVS._hurtingOccupants then continue end
 		if ZC_LVS.IsAircraft(veh) then continue end
-		-- Cars: ZC already injures the fake (clip 21.51 вывих/перелом).
-		-- We only eject on a hard slam — 3.0.4 skipped eject entirely.
-		-- B2 (08.10) "разрывает при поворотах": the old open-car branch fired
-		-- at dv >= 10 EVERY tick with no cooldown. dv 10-40 per tick is normal
-		-- driving noise (suspension bob, centripetal in a turn), so steering
-		-- or throttle stacked 3-90 BLAST PER TICK (~60+ dmg/sec) into the
-		-- organism — death from blood loss, and the death stack
-		-- (DMG_BLAST * 200/lend, lend ~ body's own pelvis) tore the corpse
-		-- apart. A real crash is a SINGLE-TICK spike (LVS itself only counts
-		-- collision damage at VelDif > 1000, sv_physics.lua). Spike-only +
-		-- 0.5s gate: 60 km/h into a wall (dv ~ 870) = heavy injury, plain
-		-- driving/turning = zero.
+		-- МАШИНЫ: почему порог именно такой.
+		-- Раньше ветка срабатывала при dv >= 10 КАЖДЫЙ тик без задержки.
+		-- Но dv 10-40 за тик — это обычный шум езды: подвеска качается,
+		-- в повороте меняется направление скорости. В итоге поворот руля
+		-- насыпал 3-90 BLAST за тик (~60+ урона в секунду): смерть от
+		-- кровопотери, а стек урона при смерти рвал тело на части.
+		--
+		-- Настоящая авария — это ОДНОТИКОВЫЙ скачок (сам LVS считает
+		-- урон столкновения только при VelDif > 1000). Поэтому: только
+		-- скачок + пауза 0.5 с. Стена на 60 км/ч даёт dv ~ 870 (тяжёлая
+		-- травма), обычная езда и повороты — ноль.
 		if ZC_LVS.IsCar(veh) then
 			local dv = veh._zc_lvs_dv or 0
-			-- Per-vehicle open/closed class is stable: cache on the hull so
-			-- IsOpenCarHull (OBB + seat walk) does not run every tick.
+			-- Класс «открытая/закрытая» у корпуса не меняется: кэшируем,
+			-- чтобы IsOpenCarHull (OBB + обход мест) не считался каждый тик.
 			local openHull = veh._zc_lvs_openhull
 			if openHull == nil then
 				openHull = ZC_LVS.IsOpenCarHull(veh) or false
@@ -274,11 +365,12 @@ hook.Add("Tick", "zc_lvs_plane_dv", function()
 			if dv >= 20 or (prev and prev:Length() >= 780) then
 				ZC_LVS.DebugLog("car_crash_check", "veh=" .. veh:GetClass() .. " open=" .. tostring(openHull) .. " gun=" .. tostring(ZC_LVS.CarHasGunSeat(veh)) .. " dv=" .. string.format("%.1f", dv) .. " speed=" .. string.format("%.1f", prev and prev:Length() or 0))
 			end
+			-- Открытый кузов ловит удар раньше: там тело ничем не закрыто.
 			local spike = openHull and 120 or 260
 			if dv >= spike and prev and prev:Length() >= 140 then
 				local now = CurTime()
-				-- One hit per 0.5s, and never twice in the same tick as the
-				-- collision-event path below (zc_lvs_crash_org shares the gate).
+				-- Один удар в 0.5 с и никогда дважды в одном тике с путём
+				-- события столкновения ниже (zc_lvs_crash_org делит эту паузу).
 				if not (veh._zc_lvs_org_t == now)
 					and not (veh._zc_lvs_car_t and veh._zc_lvs_car_t > now) then
 					veh._zc_lvs_org_t = now

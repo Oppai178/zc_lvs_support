@@ -1,5 +1,24 @@
--- [Z-CITY] LVS SUPPORT
--- Author: Oppai
+--[[
+	[Z-CITY] LVS SUPPORT — РАЗВЕДЕНИЕ КЛАВИШ (shared)
+	Author: Oppai
+
+	Проблема: у LVS и Z-City одни и те же клавиши значат разное.
+	  Цифры 1-0 : LVS = оружие техники, Z-City = слоты личного оружия
+	  Alt       : LVS = FREELOOK (осмотр), Z-City = «идти шагом»
+	  Ctrl      : LVS = третье лицо, Z-City = присесть/наклон
+	  R         : LVS = двигатель, Z-City = перезарядка
+
+	Здесь мы разводим их по контексту. Обёртки ставятся на хуки LVS
+	("!!!lvsButtonDown", "!!!lvsSeatSwitcherButtonDown") — они
+	регистрируются позже нас, поэтому ловим их ретраями.
+
+	Итоговое управление:
+	  1-0        — оружие техники
+	  Alt + 1-0  — смена места
+	  E          — выход (Alt НЕ выходит, это «шаг» у ZC)
+	  ПКМ        — прицел LVS на месте стрелка
+	  Ctrl       — наклон Z-City в открытой машине (третьего лица нет)
+]]
 
 ZC_LVS = ZC_LVS or {}
 
@@ -8,6 +27,8 @@ local ALT_KEYS = {
 	[KEY_RALT] = true,
 }
 
+-- Оборачиваем хуки кнопок LVS. Хуки LVS появляются не сразу, поэтому
+-- пробуем на InitPostEntity, LVS:Initialize и раз в секунду (до 20 раз).
 local function wrapLVSBinds()
 	local hooks = hook.GetTable().PlayerButtonDown
 	if not hooks then return end
@@ -25,18 +46,19 @@ local function wrapLVSBinds()
 		local oldDown = hooks["!!!lvsButtonDown"]
 		hook.Add("PlayerButtonDown", "!!!lvsButtonDown", function(ply, button)
 			if ZC_LVS.Enabled() and IsValid(ply) and ply.lvsGetVehicle and IsValid(ply:lvsGetVehicle()) then
+				-- В отключке никакие клавиши техники не работают.
 				if ZC_LVS.IsUnconscious(ply) then
 					return
 				end
-				-- Walk is often Alt. In cars Alt is seat-switch only.
-				-- In aircraft let LVS see Alt as FREELOOK (look around).
+				-- Alt в машине — только модификатор смены места.
+				-- В авиации пропускаем его в LVS как FREELOOK (осмотр).
 				if ALT_KEYS[button] then
 					if ZC_LVS.ShouldUseLVSCamera(ply) then
 						return oldDown(ply, button)
 					end
 					return
 				end
-				-- Alt+1-0 is seat switch. Never let LVS treat it as a weapon.
+				-- Alt+цифра = смена места. LVS не должен считать это оружием.
 				if ZC_LVS.WEAPON_KEYS[button] and ZC_LVS.HoldingAlt(ply) then
 					return
 				end
@@ -55,6 +77,8 @@ local function wrapLVSBinds()
 			if not ZC_LVS.WEAPON_KEYS[button] then
 				return
 			end
+			-- В открытых машинах смену мест ведёт Z-City (как в Glide),
+			-- наш переключатель там не нужен.
 			local chassis = ZC_LVS.GetChassis(ply:GetVehicle())
 			if IsValid(chassis) and ZC_LVS.IsOpenCarHull(chassis) then return end
 			if ZC_LVS.IsUnconscious(ply) then
@@ -64,16 +88,17 @@ local function wrapLVSBinds()
 				return
 			end
 
-			-- Do not abort on lastswitched: that flag is also set by
-			-- weapon keys / the mark-hook, and it blocked Alt+digit.
+			-- Не проверяем lastswitched: этот флаг ставят и клавиши оружия,
+			-- и mark-хук — из-за него Alt+цифра не работала.
 			if ply.zc_lvs_switch_press and ply.zc_lvs_switch_press > CurTime() then
 				return
 			end
 			ply.zc_lvs_switch_press = CurTime() + 0.25
 
-			-- LVS ExitVehicle runs inside oldSwitch, before
-			-- OnPlayerRequestSeatSwitch. Mark first so ZC FakeUp's
-			-- instead of yeeting the ragdoll at speed.
+			-- ВАЖНО: внутри oldSwitch LVS вызывает ExitVehicle ДО
+			-- OnPlayerRequestSeatSwitch. Помечаем смену места заранее,
+			-- иначе Z-City поднимет игрока на ноги (FakeUp) вместо
+			-- пересадки, и на скорости тело выкинет.
 			if ZC_LVS.MarkSeatSwitch then
 				ZC_LVS.MarkSeatSwitch(ply)
 			else
@@ -105,14 +130,15 @@ hook.Add("LVS.PlayerKeyDown", "zc_lvs_otrub", function(ply, name, pressed)
 	if ZC_LVS.IsUnconscious(ply) then
 		return false
 	end
-	-- R is both LVS ENGINE and weapon reload. Only mute the engine
-	-- when hands are empty; a gun should reload, not stall the car.
+	-- R — это и двигатель LVS, и перезарядка Z-City. Глушим двигатель
+	-- только с пустыми руками: с оружием R должна перезаряжать, а не
+	-- глушить машину.
 	if name == "ENGINE" and not ZC_LVS.HasEmptyHands(ply) then
 		return false
 	end
-	-- LVS THIRDPERSON defaults to +duck. CTRL on a fake is the Z-City
-	-- lean (legs leave the view, you sit back). Clip 18.55: that press
-	-- also toggled the LVS chase camera.
+	-- THIRDPERSON у LVS висит на +duck. Но Ctrl с фейком — это наклон
+	-- Z-City (ноги уходят из вида, ты откидываешься назад). Одно нажатие
+	-- заодно переключало погонную камеру LVS — глушим в открытой машине.
 	if name == "THIRDPERSON" then
 		local veh = ZC_LVS.GetVehicle(ply)
 		if ZC_LVS.IsOpenCarHull(veh) then
@@ -121,10 +147,10 @@ hook.Add("LVS.PlayerKeyDown", "zc_lvs_otrub", function(ply, name, pressed)
 	end
 end)
 
--- If CTRL already flipped the view before the key hook, put it back.
--- ThirdPersonMode is a CHASSIS method in stock LVS (lvs_hookers.lua
--- calls vehicle:SetThirdPersonMode). Some packs also define it on pods;
--- reset both when present, never call a method that does not exist.
+-- Если Ctrl уже переключил вид до нашего хука — возвращаем обратно.
+-- В стоке LVS ThirdPersonMode — метод ШАССИ (lvs_hookers.lua зовёт
+-- vehicle:SetThirdPersonMode). Некоторые паки определяют его и на поде,
+-- поэтому сбрасываем оба, но только если метод реально существует.
 hook.Add("Think", "zc_lvs_no_open_car_tp", function()
 	if not ZC_LVS.Enabled() then return end
 	for _, ply in player.Iterator() do
@@ -146,6 +172,8 @@ hook.Add("Think", "zc_lvs_no_open_car_tp", function()
 end)
 
 if SERVER then
+	-- Цифры 5-0: LVS сам обрабатывает только 1-4, остальные добираем
+	-- через оружейный хендлер. С Alt не срабатывает — это смена места.
 	hook.Add("PlayerButtonDown", "zc_lvs_extra_weapons", function(ply, button)
 		if not ZC_LVS.Enabled() then return end
 		if not IsValid(ply) or not ply.lvsGetWeaponHandler then return end

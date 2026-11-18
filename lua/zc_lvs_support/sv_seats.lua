@@ -1,11 +1,49 @@
--- [Z-CITY] LVS SUPPORT
--- Author: Oppai
+--[[
+	[Z-CITY] LVS SUPPORT — ФЕЙК-РЕГДОЛЛЫ И МЕСТА (сервер)
+	Author: Oppai
+
+	Самый большой и самый обстрелянный модуль. Отвечает за то, чтобы
+	живой игрок в технике LVS имел тело: фейк-регдолл, который сидит в
+	кресле, получает урон, а в отрубе падает и его можно вытащить.
+
+	ЧТО ЗДЕСЬ ПРОИСХОДИТ
+	  Посадка  — PlayerEnteredVehicle: создаём фейк нужного типа,
+	             ставим в позу, привариваем/парентим к корпусу.
+	  Езда     — Think zc_lvs_closed_keep: держим тело в кресле, следим
+	             за отключкой, за тем что кто-то тянет тело наружу.
+	  Выход    — PlayerLeaveVehicle: снимаем сварки, возвращаем вес,
+	             поднимаем игрока (если он не в отрубе).
+	  Отключка — HG_OnOtrub: водитель теряет управление, машина глохнет.
+	  Вытаскивание — PlayerUse по регдоллу: игрок покидает место, тело
+	             остаётся лежать с настоящим весом.
+
+	ГЛАВНЫЕ ЗАПРЕТЫ (нарушение = сломанная физика или удалённая техника)
+	  1. НИКОГДА не phys:SetPos регдоллу, у которого есть parent.
+	     Движок считает это локальной координатой, тело улетает в
+	     z = -23809, движок пишет "Crazy origin" и удаляет регдолл
+	     ВМЕСТЕ с шасси LVS. Двигать можно только через SetLocalPos
+	     или сняв parent beforehand.
+	  2. НИКОГДА не EnableCollisions/EnableMotion внутри физического
+	     колбэка (Think после симуляции). GMod падает с "Changing
+	     collision rules within a callback". Все такие вызовы
+	     отложены через timer.Simple(0).
+	  3. НИКОГДА не варить живого водителя к корпусу напрямую —
+	     сварки ZC имеют CallOnRemove -> ExitVehicle, и их обрыв
+	     выкидывает игрока из машины на ходу.
+
+	ПОЧЕМУ ТАК МНОГО КОДА
+	  Z-City и LVS по-разному понимают «игрок в технике». ZC варит
+	  регдолл к шасси (как в Glide), LVS считает под точкой без тела.
+	  Половина файла — согласование этих двух моделей: сброс кэшей LVS,
+	  блокировка авто-фейка ZC, «ремень безопасности» на ExitVehicle,
+	  чтобы обрыв сварки не выкидывал игрока.
+]]
 
 ZC_LVS = ZC_LVS or {}
 
--- Parent/weld only. OBB/dist matched leftover corpses inside a tank and
--- blocked the next sit (Sherman one-shot).
--- Open-car dummy: parented to the hull after freeze, or still bound via follow.
+-- Тело всё ещё в машине? Смотрим только на parent и сварки.
+-- Раньше проверяли ещё OBB и расстояние — и брошенный труп внутри
+-- танка блокировал следующую посадку (Sherman садился один раз).
 local function ragStillInVehicle(rag, veh, pod)
 	if not IsValid(rag) then return false end
 	if rag.zc_lvs_car_fake and rag.zc_lvs_follow == veh then
@@ -19,15 +57,17 @@ local function ragStillInVehicle(rag, veh, pod)
 	return false
 end
 
--- ZC welds CallOnRemove РІвЂ вЂ™ ExitVehicle. Keep removingwelds true past this
--- call: constraint Remove can fire the callback a tick later.
--- hold=true: stay blocked while seated.
--- keepParent=true: air/tank РІР‚вЂќ weld off so the hull does not torque, parent stays.
+-- Снять сварки с тела. У сварок Z-City есть CallOnRemove -> ExitVehicle,
+-- поэтому флаг removingwelds держим дольше самого вызова: движок может
+-- дёрнуть колбэк на тик позже, и игрока выкинет из машины.
+--   hold=true       — флаг остаётся навсегда (пока сидим)
+--   keepParent=true — авиация/танк: сварки снимаем (иначе корпус
+--                     крутит от веса тела), а parent оставляем
 local function dropSeatWelds(rag, hold, keepParent)
 	if not IsValid(rag) then return end
 	rag.removingwelds = true
-	-- Pelvis anchor offset dies with the seat: nothing holds the body
-	-- to the hull after this.
+	-- Якорь таза умирает вместе с местом: после этого ничто не держит
+	-- тело у корпуса.
 	rag.zc_lvs_anchor_local = nil
 	if rag.welds then
 		for _, weld in pairs(rag.welds) do
@@ -50,13 +90,9 @@ local function dropSeatWelds(rag, hold, keepParent)
 	end)
 end
 
--- Motion off, collisions off, no parent, no weld.
--- Collisions-on was shoving the player out of helis/trucks/planes.
--- Parent-to-pod physics-deleted gunner vehicles.
--- ZC copies ~player mass onto every ragdoll bone. Welded to LVS that is
--- a tonne on the chassis: cars crawl, helis tip over.
--- ZC welds pelvis + thighs + calves to the chassis (Glide). Those bones
--- must keep motion or the weld does not ride (clip 18.11: dummy on grass).
+-- Кости, которые Z-City приваривает к шасси (поведение из Glide).
+-- Им нельзя выключать motion: сварка перестанет «ехать» вместе с
+-- машиной и тело останется лежать на траве.
 local WELD_BONES = {
 	["ValveBiped.Bip01_Pelvis"] = true,
 	["ValveBiped.Bip01_L_Thigh"] = true,
@@ -65,14 +101,17 @@ local WELD_BONES = {
 	["ValveBiped.Bip01_L_Calf"] = true,
 }
 
--- Car fake body (restored 07.10): the months-tested car version — freeze
--- every bone except the welded pelvis/legs, gravity off, mass 0.15. The
--- "live body" experiment (motion on, gravity off) made the fake float,
--- fly around and slam into the hull on exit (otrub). The arms you SEE in
--- cars are the ZC camera viewmodel, not ragdoll bones — the camera matrix
--- (mode=zc) draws them; the body only needs to sit and take damage.
--- M113 passengers ride this exact path now (Oppai: "take the working car
--- code and put it on the M113 passengers").
+-- Облегчение тела в машине — версия, проверенная месяцами.
+-- Почему так: Z-City копирует массу игрока (~80 кг) на КАЖДУЮ кость.
+-- Приваренное к шасси это тонна лишнего веса: машины еле ползут,
+-- вертолёты заваливаются. Поэтому масса 0.15 и коллизии выключены.
+--
+-- Все кости заморожены, кроме приваренных таза/ног. Эксперимент
+-- «живое тело» (motion включён) заставлял фейк плавать, летать и
+-- биться о корпус при выходе. Руки, которые ВИДНО в машине — это
+-- вьюмодель камеры Z-City, а не кости регдолла: их рисует матрица
+-- камеры (mode=zc). Телу нужно только сидеть и принимать урон.
+-- Пассажиры M113 идут по этому же пути.
 local function lightenCarFake(rag)
 	if not IsValid(rag) then return end
 	rag.zc_lvs_light = true

@@ -1,10 +1,14 @@
 --[[
-	[Z-CITY] LVS SUPPORT
+	[Z-CITY] LVS SUPPORT — ПРИНУДИТЕЛЬНАЯ ПОСАДКА (клиент)
 	Author: Oppai
 
-	Force seat, client side: radial menu entries (Z-City radialOptions
-	hook). Shows "Посадить" / "Вытащить" when the eye trace is on an LVS
-	vehicle (or its seated occupant) and a second player is nearby.
+	Пункты радиального меню Z-City: «Посадить» / «Вытащить». Появляются,
+	когда взгляд упёрся в технику LVS (или в сидящего в ней) и рядом
+	есть второй игрок. Паттерн Z-City: hg.radialOptions[#+1] = {fn, name}.
+
+	Это только меню. Все проверки — на сервере (sv_forceseat.lua),
+	клиенту не доверяем: он лишь отправляет цель и место.
+	Выключено по умолчанию (zc_lvs_forceseat 0).
 ]]
 
 ZC_LVS = ZC_LVS or {}

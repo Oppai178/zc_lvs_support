@@ -1,16 +1,39 @@
--- [Z-CITY] LVS SUPPORT
--- Author: Oppai
+--[[
+	[Z-CITY] LVS SUPPORT — TPIK: РУКИ И ВЗГЛЯД (клиент)
+	Author: Oppai
+
+	TPIK (third person IK) — система Z-City, которая ставит руки игрока
+	на руль, оружие и предметы. Она знает только про Glide/simfphys,
+	про LVS не знает ничего. Здесь мы её учим.
+
+	ЧТО ДЕЛАЕМ
+	  1. hg.eyeTrace — фильтр взгляда. HUD Z-City («Identifier») печатает
+	     имя того, во что упёрся взгляд, включая нашего же фейка внутри
+	     закрытого корпуса. Патчить ZC нельзя — фильтруем саму трассу.
+	  2. hg.GetCarSteering — подсовываем шасси вместо пода, иначе ZC
+	     ищет кость руля не там.
+	  3. hg.MainTPIKFunction — главный решатель: рисовать руки или нет.
+	  4. hg.CanUseLeftHand — то же для левой руки.
+
+	ГЛАВНОЕ ПРАВИЛО ПО РУКАМ (08.10)
+	  режим "zc" -> руки рисуем ВСЕГДА (водитель открытой машины,
+	                пассажир, экипаж вертолёта, десант на трапе,
+	                стрелок в люке). Фейк здесь и есть вьюмодель.
+	                Исключение: под с HidePlayer — тела не видно,
+	                вешать руки не на что.
+	  режим lvs_* -> руки НЕ рисуем: там свой прицел/интерьер пака,
+	                TPIK затягивал куртку прямо в камеру.
+]]
 
 ZC_LVS = ZC_LVS or {}
 
 local function wrapTPIK()
 	if not hg then return end
 
-	-- ZC "Identifier" HUD hook prints the name over whatever hg.eyeTrace
-	-- hits — including our seat fake inside a closed hull and the LVS
-	-- attached player model. Cannot patch ZC files: filter the trace
-	-- itself. While the local player rides a closed/LVS-camera vehicle,
-	-- occupant fakes stop being trace targets.
+	-- HUD Z-City печатает имя над тем, что поймал hg.eyeTrace — в том
+	-- числе над нашим фейком в закрытом корпусе и над моделью игрока,
+	-- прикреплённой к LVS. Пока локальный игрок едет в закрытой технике
+	-- (или с камерой LVS), фейки пассажиров перестают быть целью трассы.
 	if hg.eyeTrace and not ZC_LVS._wrappedEyeTrace then
 		ZC_LVS._wrappedEyeTrace = true
 		local oldEyeTrace = hg.eyeTrace
@@ -43,6 +66,8 @@ local function wrapTPIK()
 		end
 	end
 
+	-- ZC ищет кость руля (steering / steeringwheel) на переданной
+	-- сущности. Если передать под — кости там нет. Подменяем на шасси.
 	if hg.GetCarSteering and not ZC_LVS._wrappedSteer then
 		ZC_LVS._wrappedSteer = true
 		local oldSteer = hg.GetCarSteering
@@ -60,20 +85,9 @@ local function wrapTPIK()
 	if hg.MainTPIKFunction and not ZC_LVS._wrappedTPIK then
 		ZC_LVS._wrappedTPIK = true
 		local oldMain = hg.MainTPIKFunction
-		-- GATE TABLE (Oppai 08.10, final):
-		--   mode "zc" (open cars, air, closed-hull seats with eyes, troop
-		--     ramp, hatch gunner standing at the MG) → the ZC fake IS the
-		--     viewmodel: ORIGINAL TPIK, always. This is the
-		--     gaz-66-works / M113-and-gaz-24-don't arms fix: hands must
-		--     render in EVERY zc seat — driver of an open car, passenger,
-		--     helicopter/plane crew.
-		--     Exception: pods that hide the player (HidePlayer turret seats)
-		--     have no visible body to hang hands on → muffled.
-		--   lvs_closed / lvs_gun (native LVS camera: tank periscopes, pack
-		--     sights) → muffled: TPIK would draw the jacket into the camera
-		--     (clip 18.01 red vs black in M113).
-		--   lvs-driver of a LVS car (the no-Glide case below) → Glide
-		--     substitute so the hands sit on the wheel.
+		-- Решатель рук. Порядок важен: сначала режим камеры, потом
+		-- частные случаи. Это исправление «у газ-66 руки есть, а у
+		-- M113 и газ-24 нет»: руки должны быть на КАЖДОМ zc-месте.
 		function hg.MainTPIKFunction(ent, ply, wpn)
 			if not ZC_LVS.Enabled() or not IsValid(ply) or not ply:IsPlayer() or not ply.InVehicle or not ply:InVehicle() then
 				return oldMain(ent, ply, wpn)
@@ -84,22 +98,21 @@ local function wrapTPIK()
 			local pod = ply:GetVehicle()
 
 			if mode == "zc" then
-				-- "zc" everywhere: hands render. Except hidden pods — a
-				-- HidePlayer turret seat shows no body at all, so no arms.
+				-- Руки рисуем везде. Кроме скрытых подов: на месте
+				-- стрелка с HidePlayer тела не видно вовсе.
 				if ZC_LVS.PodHidesPlayer(pod) then return end
 				return oldMain(ent, ply, wpn)
 			end
 
 			if mode == "lvs_closed" or mode == "lvs_gun"
 				or mode == "lvs_air" or mode == "lvs_plane" then
-				-- Native LVS camera: their own sights/interior own the view.
+				-- Родная камера LVS: вид принадлежит их прицелу/интерьеру.
 				return
 			end
 
-			-- mode "none" or off: not our seat — vanilla behavior, EXCEPT
-			-- the driver of a LVS car that slipped past the mode gate
-			-- (IsExternalLVSSeat covers closed hulls; enclosed pods would
-			-- draw the jacket into the camera, clip 18.01).
+			-- Режим "none" или мод выключен: не наше место, ведём себя
+			-- ванильно. Кроме водителя машины LVS, который проскочил
+			-- мимо проверки режима — там подменяем Glide (ниже).
 			if ZC_LVS.IsExternalLVSSeat(ply) then return end
 			if ZC_LVS.IsClosedVehicle(veh) or ZC_LVS.PodHidesPlayer(pod)
 				or ZC_LVS.IsHatchSeat(ply, pod, veh)
@@ -110,11 +123,10 @@ local function wrapTPIK()
 				return oldMain(ent, ply, wpn)
 			end
 
-			-- ZC TPIK only looks at Glide/simfphys/GetVehicle(). Temporarily
-			-- present the LVS chassis as a Glide vehicle so the driver holds the wheel.
-			-- Conflicts with the "zc" skip above: none — this branch only
-			-- runs when mode is NOT "zc", and the zc driver took the early
-			-- oldMain return already.
+			-- ZC TPIK смотрит только на Glide/simfphys/GetVehicle().
+			-- Временно выдаём шасси LVS за машину Glide, чтобы водитель
+			-- взял руль. Подмена снимается сразу после вызова — иначе
+			-- она утекла бы в остальную логику ZC.
 			local oldGet = ply.GlideGetVehicle
 			local oldSeat = ply.GlideGetSeatIndex
 			ply.GlideGetVehicle = function()
@@ -135,6 +147,8 @@ local function wrapTPIK()
 		end
 	end
 
+	-- Левая рука: та же подмена Glide, чтобы ZC разрешил её использовать
+	-- за рулём (иначе левая рука «занята» несуществующей машиной).
 	if hg.CanUseLeftHand and not ZC_LVS._wrappedLeftHand then
 		ZC_LVS._wrappedLeftHand = true
 		local oldLeft = hg.CanUseLeftHand

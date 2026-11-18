@@ -1,15 +1,43 @@
--- [Z-CITY] LVS SUPPORT
--- Author: Oppai
+--[[
+	[Z-CITY] LVS SUPPORT — ЯДРО (shared: сервер + клиент)
+	Author: Oppai
+
+	Здесь живут три вещи, от которых зависит всё остальное:
+
+	1. КЛАССИФИКАЦИЯ ТЕХНИКИ. Что это: машина, вертолёт, самолёт, танк,
+	   буксируемая пушка, дрон? От ответа зависит и камера, и фейк, и урон.
+	   Паки LVS оформляют технику по-разному, поэтому определяем не одним
+	   признаком, а несколькими (тип, цепочка базовых классов, наличие
+	   характерных методов). См. IsCar / IsAircraft / IsPlane / IsClosed.
+
+	2. МАТРИЦА МЕСТ (SeatMatrix). Для каждого места отвечает на три
+	   вопроса: нужен ли фейк, чьи глаза смотрят, разрешён ли Ctrl.
+	   Это единственный источник правды по камерам наземной техники.
+
+	3. РЕЖИМ КАМЕРЫ (CameraMode). Сводит матрицу и классификацию в одну
+	   строку: "zc" / "lvs_air" / "lvs_plane" / "lvs_gun" / "lvs_closed".
+	   Все остальные модули спрашивают только её, а не гадают сами.
+
+	Плюс обёртки над Z-City (NoFakeInCar, NoCameraInCar, GlideGetVehicle),
+	через которые мод говорит Z-City «эту технику не трогай, я сам».
+]]
 
 ZC_LVS = ZC_LVS or {}
 ZC_LVS.Author = "Oppai"
 
+-- Консольные переменные. FCVAR_REPLICATED — значение с сервера приходит
+-- клиентам, чтобы урон и фейк считались одинаково на обеих сторонах.
 CreateConVar("zc_lvs_enabled", "1", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Enable Z-City LVS compatibility", 0, 1)
 CreateConVar("zc_lvs_fake", "1", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Ragdoll (fake) players inside LVS vehicles", 0, 1)
 CreateConVar("zc_lvs_air_fake", "1", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Ragdoll (fake) in LVS helicopters/planes", 0, 1)
+-- Имя сменено 08.10 намеренно: у людей в конфиге осталось archived=1 от
+-- старого zc_lvs_air_camera, и новая логика не включалась. Новое имя
+-- стартует с 0 (глаза Z-City), а старое значение просто игнорируется.
 CreateConVar("zc_lvs_air_lvcam", "0", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Use native LVS camera for helicopters/planes (opt-out; default ZC eyes). Renamed from zc_lvs_air_camera 08.10: the old archived value=1 stuck on live servers", 0, 1)
 CreateConVar("zc_lvs_crash_damage", "1", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Transfer LVS crash damage into the organism", 0, 1)
 CreateConVar("zc_lvs_explode_damage", "1", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Transfer LVS explosion damage into the organism", 0, 1)
+-- Выброс при ДТП выключен (08.10): удар теперь даёт травмы и отключку,
+-- а не выкидывает тело. Оставлен как переключатель для старой механики.
 CreateConVar("zc_lvs_crash_eject", "0", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Legacy crash ejection (disabled; impacts damage occupants)", 0, 1)
 CreateConVar("zc_lvs_pen", "1", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Bullets pass glass/open doors into the cabin", 0, 1)
 CreateConVar("zc_lvs_shrapnel", "1", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Vehicle explosion throws a few metal fragments", 0, 1)
@@ -18,8 +46,8 @@ CreateConVar("zc_lvs_air_fall", "0", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Unconsci
 CreateConVar("zc_lvs_debug", "0", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Print ZC LVS seat and cargo diagnostics", 0, 1)
 CreateConVar("zc_lvs_forceseat", "0", FCVAR_ARCHIVE + FCVAR_REPLICATED, "Allow putting other players into LVS seats via the radial menu (ArmA-style load)", 0, 1)
 
--- Per-frame tags are throttled to one line per half second: they flooded
--- the console so hard GMod truncated it (clip 05.10).
+-- Покадровые теги душим до одной строки в 3 секунды: без этого консоль
+-- забивалась так, что GMod обрезал вывод и полезные строки терялись.
 local THROTTLE_TAGS = {
 	view = true,
 	view_lvs = true,
@@ -77,10 +105,16 @@ function ZC_LVS.Enabled()
 	return GetConVar("zc_lvs_enabled"):GetBool()
 end
 
+-- Флаг .LVS = true стоит ТОЛЬКО на lvs_base (само шасси).
+-- Ни турели (lvs_base_gunner), ни снаряды, ни колёса его не имеют —
+-- у них свои признаки (LVS_GUNNER, lvsProjectile, _LVS). Поэтому
+-- «это часть LVS?» и «это шасси LVS?» — разные вопросы.
 function ZC_LVS.IsLVS(ent)
 	return IsValid(ent) and ent.LVS == true
 end
 
+-- Место, за которое отвечает наш мод: либо само шасси (некоторые паки
+-- сажают прямо в него), либо pod, припарентованный к шасси LVS.
 function ZC_LVS.IsLVSSeat(ent)
 	if not IsValid(ent) then return false end
 	if ent.LVS then return true end
@@ -95,6 +129,8 @@ function ZC_LVS.IsLVSSeat(ent)
 	return false
 end
 
+-- Из любого места/детали достаём шасси. Проверяем три пути, потому что
+-- паки по-разному связывают pod и корпус.
 function ZC_LVS.GetChassis(ent)
 	if not IsValid(ent) then return NULL end
 	if ent.LVS then return ent end
@@ -117,7 +153,8 @@ function ZC_LVS.GetVehicle(ply)
 
 	if ply:InVehicle() then
 		local pod = ply:GetVehicle()
-		-- LVS caches a failed lookup on the pod. Force a parent check.
+		-- LVS кэширует неудачный поиск на поде (LVSchecked) и потом
+		-- возвращает NULL навсегда. Сбрасываем, чтобы проверить parent.
 		if IsValid(pod) then
 			pod.LVSchecked = nil
 		end
@@ -133,12 +170,17 @@ function ZC_LVS.GetVehicle(ply)
 	return NULL
 end
 
+-- Тип, который пак сам объявил через GetVehicleType ("car", "helicopter",
+-- "tank", "gunner"...). Пустая строка = пак не объявил, тогда определяем
+-- по базовым классам и характерным методам.
 function ZC_LVS.GetType(veh)
 	if not IsValid(veh) then return "" end
 	if not isfunction(veh.GetVehicleType) then return "" end
 	return veh:GetVehicleType() or ""
 end
 
+-- Роль места: driver / gunner / passenger. Стрелка проверяется первой,
+-- потому что на некоторых паках водительский под тоже несёт оружие.
 function ZC_LVS.PodRole(ply, pod, veh)
 	if not IsValid(pod) then return "unknown" end
 	veh = veh or ZC_LVS.GetChassis(pod)
@@ -148,9 +190,11 @@ function ZC_LVS.PodRole(ply, pod, veh)
 	return "passenger"
 end
 
--- Walk ENT.Base through scripted_ents. Packs do
---   ENT.Base = "lvs_my_uaz" в†’ "lvs_base_wheeldrive"
--- Immediate .Base is not enough.
+-- Цепочка наследования ENT.Base через scripted_ents.
+-- Паки пишут: ENT.Base = "lvs_my_uaz" -> "lvs_base_wheeldrive".
+-- Одного .Base недостаточно: он указывает на промежуточный класс пака,
+-- а настоящий базовый класс LVS лежит на 2-3 уровня глубже.
+-- Результат кэшируется на сущности — цепочка не меняется за её жизнь.
 function ZC_LVS.BaseChain(veh)
 	if not IsValid(veh) then return {} end
 	if veh._zc_lvs_bases then return veh._zc_lvs_bases end
@@ -162,6 +206,7 @@ function ZC_LVS.BaseChain(veh)
 	end
 	local b = veh.Base
 	local seen = {}
+	-- seen + лимит 16: защита от циклического наследования в кривом паке.
 	for _ = 1, 16 do
 		if not isstring(b) or b == "" or seen[b] then break end
 		seen[b] = true
@@ -174,6 +219,7 @@ function ZC_LVS.BaseChain(veh)
 	return list
 end
 
+-- Наследуется ли техника от одного из перечисленных базовых классов.
 function ZC_LVS.Inherits(veh, names)
 	if not IsValid(veh) or not istable(names) then return false end
 	for _, name in ipairs(ZC_LVS.BaseChain(veh)) do
@@ -182,6 +228,8 @@ function ZC_LVS.Inherits(veh, names)
 	return false
 end
 
+-- Есть ли подстрока в любом имени цепочки. Для паков с нестандартными
+-- именами баз (lvs_mypack_tank_base и т.п.).
 function ZC_LVS.ChainHas(veh, needle)
 	if not IsValid(veh) or not isstring(needle) or needle == "" then return false end
 	needle = string.lower(needle)
@@ -246,6 +294,9 @@ function ZC_LVS.IsInOpenDoorway(veh, worldPos)
 	return false
 end
 
+-- Игрок стоит у задней части машины (для выгрузки тел из кузова).
+-- Считаем в локальных координатах корпуса: у LVS ось X смотрит вперёд,
+-- поэтому «зад» — это минимум X.
 function ZC_LVS.IsAtRear(ply, veh)
 	if not IsValid(ply) or not IsValid(veh) then return false end
 	if not ZC_LVS.IsCar(veh) then return false end
@@ -260,6 +311,8 @@ function ZC_LVS.IsAtRear(ply, veh)
 	return ply:GetPos():DistToSqr(rear) < 110 * 110
 end
 
+-- Известные базовые классы LVS. Это НЕ хардкод под конкретные паки:
+-- это классы самого фреймворка, от которых наследуется любой пак.
 local AIR_BASES = {
 	lvs_base_helicopter = true,
 	lvs_base_fighterplane = true,
@@ -271,18 +324,26 @@ local DRONE_TYPES = {
 	drone = true,
 }
 
--- FPV drones (LVS UAV packs: the pilot sits in the DRONE's driver seat --
--- sw_uav catapult Use() does EnterVehicle(UAV:GetDriverSeat()) -- while
--- the pack renders an operator model at the control station and its own
--- FPV screen). No fake, no ZC camera: the pack screen IS the vanilla
--- view. LVS keeps the airframe HP/damage.
+-- FPV-дроны (UAV-паки LVS). Особенность: пилот физически сидит в
+-- водительском поде самого дрона, а пак рисует оператора у пульта и
+-- свой FPV-экран. Значит нам тут делать нечего: ни фейка, ни камеры —
+-- экран пака и есть вид. Урон по корпусу остаётся на LVS.
+--
+-- ВАЖНО: определяем только по явным признакам. Раньше сюда попадал любой
+-- пак с методом GetCameraController или словом "drone" где угодно в
+-- имени — и обычные вертолёты теряли фейк и камеру.
 function ZC_LVS.IsDrone(veh)
 	if not IsValid(veh) then return false end
 	if DRONE_TYPES[ZC_LVS.GetType(veh)] then return true end
 	if veh.LVSUAV == true then return true end
-	if ZC_LVS.ChainHas(veh, "drone") then return true end
-	-- Packs that drive the camera from their own controller object.
-	if isfunction(veh.GetCameraController) then return true end
+	-- Явные флаги, которые ставят некоторые UAV-паки.
+	if veh.LVSDrone == true or veh.IsLVSDrone == true then return true end
+	-- Базовый класс вида lvs_*drone* / lvs_*uav*.
+	for _, name in ipairs(ZC_LVS.BaseChain(veh)) do
+		if string.find(name, "drone", 1, true) or string.find(name, "uav", 1, true) then
+			return true
+		end
+	end
 	return false
 end
 
@@ -307,9 +368,10 @@ local TRAILER_BASES = {
 	lvs_base_wheeldrive_trailer = true,
 }
 
--- LVS stationary guns: towed emplacements (FlaK 38, Pak 40) and ground
--- stations (UAV control). The crew stands at the gun in the open air —
--- same rule as an open car, not a closed hull.
+-- Буксируемые/стационарные орудия (FlaK 38, Pak 40) и наземные станции
+-- управления. Расчёт стоит у пушки на открытом воздухе — правило как у
+-- открытой машины, а не как у закрытого корпуса. HidePlayer на таком
+-- поде прячет манекен-заглушку, а не экипаж под бронёй.
 function ZC_LVS.IsStationaryGun(veh)
 	if not IsValid(veh) then return false end
 	if ZC_LVS.IsAircraft(veh) or ZC_LVS.IsPlane(veh) then return false end
@@ -320,26 +382,29 @@ end
 
 function ZC_LVS.IsAircraft(veh)
 	if not IsValid(veh) then return false end
-	-- Drones are UAV pods, not crewed aircraft: no fake, no air rules.
+	-- Дрон — это под без экипажа: ни фейка, ни воздушных правил.
 	if ZC_LVS.IsDrone(veh) then return false end
 	if AIR_TYPES[ZC_LVS.GetType(veh)] then return true end
 	if ZC_LVS.Inherits(veh, AIR_BASES) then return true end
-	-- Walker packs often Base = "lvs_walker_*" в†' hoverscript, type already "walker".
+	-- Паки шагающих роботов часто Base = "lvs_walker_*" на hoverscript,
+	-- а тип уже выставлен в "walker".
 	if ZC_LVS.ChainHas(veh, "lvs_walker") then return true end
 	return false
 end
 
--- Fighter / starfighter. Not a helicopter: mouse is flight, gear hits
--- the runway at 400+ u/s, camera is plane attitude not EyeAngles.
+-- Истребитель / звездоистребитель. Отдельно от вертолёта, потому что у
+-- него другое всё: мышь управляет полётом (не взглядом), шасси касается
+-- полосы на 400+ юнитов/с, а камера следует крену корпуса, а не EyeAngles.
 function ZC_LVS.IsPlane(veh)
 	if not IsValid(veh) then return false end
 	if ZC_LVS.IsDrone(veh) then return false end
 	local t = ZC_LVS.GetType(veh)
 	if t == "plane" or t == "starfighter" then return true end
 	if ZC_LVS.Inherits(veh, PLANE_BASES) then return true end
-	-- Hidden-type fighters expose GetLandingGear. Wheeldrive must not:
-	-- that stole ZC camera and blocked crash eject. Drones expose
-	-- GetLandingGear too (catapult launch gear) — excluded above.
+	-- Некоторые паки не объявляют тип, но дают GetLandingGear. Осторожно:
+	-- колёсная техника его тоже может иметь — и тогда у машины уезжала
+	-- камера в режим самолёта и блокировался выброс при ДТП. Поэтому
+	-- колёсные базы исключены явно. Дроны (шасси катапульты) — выше.
 	if isfunction(veh.GetLandingGear)
 		and not ZC_LVS.Inherits(veh, CAR_BASES)
 		and not ZC_LVS.ChainHas(veh, "wheeldrive") then
@@ -348,7 +413,8 @@ function ZC_LVS.IsPlane(veh)
 	return false
 end
 
--- Intact fighter: stay in the seat. Destroyed airframe may dump you.
+-- Целый истребитель: пилот остаётся в кресле. Разбитый корпус может
+-- его выбросить. Нужно, чтобы выброс по скорости не срабатывал на взлёте.
 function ZC_LVS.PlaneKeepPilot(veh)
 	if not IsValid(veh) or not ZC_LVS.IsPlane(veh) then return false end
 	if isfunction(veh.IsDestroyed) and veh:IsDestroyed() then return false end
@@ -363,6 +429,13 @@ function ZC_LVS.PlaneGearDown(veh)
 	return not ZC_LVS.IsAirborne(veh)
 end
 
+-- «Машина» = наземная техника с открытым или закрытым корпусом, где
+-- работает вся наша логика фейка и камеры. Порядок проверок важен:
+-- сначала отсекаем воздух и дронов, потом танки, и только потом
+-- признаём машиной. Финальная ветка — осознанный catch-all для паков,
+-- которые вообще не объявили ни тип, ни базу (грузовики, БТР).
+-- Из-за неё любая неизвестная техника LVS едет по автомобильной логике,
+-- а не по танковой; это меньше зла, чем «неизвестно что».
 function ZC_LVS.IsCar(veh)
 	if not IsValid(veh) then return false end
 	if ZC_LVS.IsAircraft(veh) then return false end
@@ -374,11 +447,11 @@ function ZC_LVS.IsCar(veh)
 		return false
 	end
 	if ZC_LVS.Inherits(veh, CAR_BASES) then return true end
-	-- Pack: ENT.Base = "lvs_my_car" в†’ вЂ¦ в†’ lvs_base_wheeldrive
+	-- Пак: ENT.Base = "lvs_my_car" -> ... -> lvs_base_wheeldrive
 	if ZC_LVS.ChainHas(veh, "wheeldrive") and not ZC_LVS.ChainHas(veh, "tank") then
 		return true
 	end
-	-- Other packs (trucks, APCs) that never set type/base we know.
+	-- Прочие паки без опознаваемых типа/базы.
 	if t ~= "gunner" and veh.LVS then
 		return true
 	end
@@ -796,27 +869,32 @@ function ZC_LVS.SeatEnclosed(pod, veh)
 end
 
 --[[
-	Seat matrix (Oppai 06.10, the user's own table — THE single source of
-	truth for cameras on ground vehicles; air is handled separately).
+	МАТРИЦА МЕСТ — единственный источник правды о том, кто чем смотрит
+	на наземной технике. Составлена по таблице Oppai от 06.10.
+	Авиация идёт отдельной веткой (там всё одинаково для всех мест).
 
-	Returns a table:
-	  fake   — this seat gets a ragdoll fake (body + damage + camera)
-	  eyes   — FP camera = the fake's eyes ("ZC cam" and "fake eyes" are
-	           the same thing; there are only two cameras)
-	  ctrl   — Ctrl third person works here (only on vanilla seats)
+	Возвращает три флага:
+	  fake — нужно ли этому месту фейк-регдолл (тело + хитбокс организма)
+	  eyes — камера от первого лица = глаза фейка. «Камера ZC» и «глаза
+	         фейка» — это ОДНО И ТО ЖЕ, камер всего две: наша и LVS.
+	  ctrl — работает ли Ctrl (вид от третьего лица)
 
-	G1 cars (no weapons)        → fake+eyes everywhere, no Ctrl.
-	G2 closed hulls             → seats the pack hides (no hatch: M113
-	       driver, the whole Abrams) → vanilla, Ctrl (fair or not).
-	       Troop seats with a usable rear ramp ("задние места буханки":
-	       look out, get shot, get dragged out) → fake+eyes.
-	       M113 turret gunner: hatch — fake with eyes standing at the MG.
-	G3 armed pickups (open cab) → driver/passengers fake+eyes; the gunner
-	       seat (pack sight, HidePlayer) → vanilla + Ctrl.
-	Air (all seats)             → fake+eyes, no Ctrl.
+	Правила по типам техники:
+	  G1 Обычные машины без оружия  -> фейк + глаза везде, Ctrl нет.
+	  G2 Закрытые корпуса (танки, БТР):
+	     - места, которые пак прячет, без люка (водитель M113, весь
+	       Abrams) -> только ванильный вид LVS, Ctrl разрешён;
+	     - десантные места с рабочим задним трапом («задние места
+	       буханки»: смотреть наружу, получать пули, вытаскивать тела)
+	       -> фейк + глаза;
+	     - стрелок в люке (пулемёт M113) -> фейк + глаза, стоит у пулемёта.
+	  G3 Вооружённые пикапы (открытая кабина):
+	     - водитель и пассажиры -> фейк + глаза;
+	     - место стрелка (у пака свой прицел, HidePlayer) -> ваниль + Ctrl.
+	  Авиация (все места)          -> фейк + глаза, Ctrl нет.
 
-	Ctrl is gated on zc_lvs_debug (Oppai 06.10: realism — no third person
-	in play; debug mode keeps it for testing).
+	Ctrl включается только при zc_lvs_debug 1: по правилу реализма
+	третьего лица в игре нет, оставлено для отладки.
 ]]
 function ZC_LVS.SeatMatrix(ply, pod, veh)
 	local out = { fake = false, eyes = false, ctrl = false }
@@ -824,8 +902,8 @@ function ZC_LVS.SeatMatrix(ply, pod, veh)
 	veh = veh or ZC_LVS.GetChassis(pod)
 	if not IsValid(veh) then return out end
 
-	-- FPV drone: no fake, no eyes. The pack FPV screen is the camera;
-	-- only HP/damage stays (LVS airframe takes the hits).
+	-- FPV-дрон: ни фейка, ни глаз. Камера — экран самого пака,
+	-- нам остаётся только урон по корпусу (его считает LVS).
 	if ZC_LVS.IsDrone(veh) then
 		return out
 	end
@@ -838,19 +916,19 @@ function ZC_LVS.SeatMatrix(ply, pod, veh)
 		return out
 	end
 
-	-- Ctrl only exists in debug mode (realism rule).
+	-- Ctrl существует только в режиме отладки (правило реализма).
 	local ctrlOK = ZC_LVS.DebugEnabled()
 
-	-- Stationary gun (FlaK / Pak40 / ground station): the gunner's body
-	-- is visible at the gun (fake + eyes), LVS sight on RMB. The pod
-	-- HidePlayer hides a stand-in, not a cabin -- keep the ZC eyes.
+	-- Стационарная пушка (FlaK / Pak40 / наземная станция): тело расчёта
+	-- видно у орудия (фейк + глаза), прицел LVS по ПКМ. HidePlayer на
+	-- таком поде прячет манекен-заглушку, а не кабину — глаза оставляем.
 	if ZC_LVS.IsStationaryGun(veh) then
 		out.fake = true
 		out.eyes = true
 		return out
 	end
 
-	-- Gunner seat of an ARMED OPEN pickup / car (G3): the pack sight won.
+	-- Место стрелка на ВООРУЖЁННОМ ОТКРЫТОМ пикапе (G3): прицел пака важнее.
 	if ZC_LVS.PodHidesPlayer(pod) and ZC_LVS.IsCar(veh) then
 		out.fake = true
 		out.eyes = false
@@ -858,41 +936,41 @@ function ZC_LVS.SeatMatrix(ply, pod, veh)
 		return out
 	end
 
-	-- Closed hull (G2).
+	-- Закрытый корпус (G2).
 	if ZC_LVS.IsClosedVehicle(veh) then
 		local role = ZC_LVS.PodRole(ply, pod, veh)
 		if ZC_LVS.PodHidesPlayer(pod) then
-			-- Turret gunner with an open hatch (M113): body + eyes at the MG.
+			-- Стрелок в открытом люке (M113): тело + глаза у пулемёта.
 			if ZC_LVS.IsTurretSeat(ply) and role == "gunner" then
 				out.fake = true
 				out.eyes = true
 				return out
 			end
-			-- No hatch: M113 driver, the whole Abrams. Vanilla only.
+			-- Люка нет: водитель M113, весь Abrams. Только ванильный вид.
 			out.ctrl = ctrlOK and role ~= "driver"
 			return out
 		end
-		-- The DRIVER of a closed hull sits behind armor even if his pod
-		-- does not set HidePlayer — vanilla periscopes, no fake (clip
-		-- 06.10: camera ended up in the ceiling "how am I supposed to
-		-- see anything here").
+		-- ВОДИТЕЛЬ закрытого корпуса сидит за бронёй даже если его под
+		-- не ставит HidePlayer: у него перископы, фейк не нужен.
+		-- Иначе камера оказывалась в потолке («как я тут должен видеть?»).
 		if role == "driver" then
 			out.ctrl = ctrlOK
 			return out
 		end
-		-- Troop seat: rear ramp ("задние места буханки") — fake + eyes.
+		-- Десантное место с задним трапом — фейк + глаза.
 		out.fake = true
 		out.eyes = true
 		return out
 	end
 
-	-- G1 cars: fake + eyes everywhere.
+	-- G1: обычные машины — фейк + глаза на всех местах.
 	out.fake = true
 	out.eyes = true
 	return out
 end
 
--- RMB / LVS ZOOM. BRDM default is ZC sit; this flips on the Sherman-style sight.
+-- Нажат ли прицел LVS (ПКМ / бинд ZOOM). По умолчанию стрелок сидит
+-- с камерой ZC; эта проверка переключает его на прицел как у Sherman.
 function ZC_LVS.IsAimingLVS(ply)
 	if not IsValid(ply) then return false end
 	if ply.lvsKeyDown and ply:lvsKeyDown("ZOOM") then
@@ -918,7 +996,18 @@ function ZC_LVS.CanLVSAimCached(ply)
 	return ply.zc_lvs_aim_v
 end
 
--- "zc" | "lvs_air" | "lvs_plane" | "lvs_gun" | "lvs_closed" | "none"
+-- ГЛАВНАЯ ФУНКЦИЯ КАМЕРЫ. Возвращает одну строку — режим вида:
+--   "zc"         — камера Z-City от глаз фейка (тело, руки, оружие)
+--   "lvs_air"    — родная камера LVS для вертолёта
+--   "lvs_plane"  — родная камера LVS для самолёта (следует крену)
+--   "lvs_gun"    — прицел LVS (нажат ПКМ на месте стрелка)
+--   "lvs_closed" — вид из закрытого корпуса (перископы, люк)
+--   "none"       — мод не вмешивается (не в технике / дрон / выключен)
+-- Все модули спрашивают только её и не гадают сами.
+--
+-- Вызывается много раз за кадр (TP-конвейер, HUD, хуки оружия), поэтому
+-- результат кэшируется на текущий кадр. Исключение — нажатие прицела:
+-- оно должно переключить вид в том же кадре, иначе ПКМ «залипает».
 function ZC_LVS.CameraMode(ply)
 	if not ZC_LVS.Enabled() or not IsValid(ply) then return "none" end
 	if not ply.InVehicle or not ply:InVehicle() then return "none" end
@@ -931,15 +1020,15 @@ function ZC_LVS.CameraMode(ply)
 	end
 	if not IsValid(veh) then return "none" end
 
-	-- Drone FPV: the pack's screen is the camera. Fully vanilla, no fake.
-	-- (Checked before the cache: cheap, and never flips per-frame.)
+	-- FPV-дрон: камера — экран пака, полностью ванильно. Проверяем до
+	-- кэша: дёшево и никогда не меняется покадрово.
 	if ZC_LVS.IsDrone(veh) then
 		return "none"
 	end
 
-	-- Hatch/gun RMB must be able to flip to LVS sight this frame: the
-	-- expensive CanLVSAim runs once per frame (cache), the mode itself
-	-- re-derives whenever aiming could have flipped it.
+	-- ПКМ на люке/пушке обязан переключить вид в этом же кадре. Дорогой
+	-- CanLVSAim считается раз в кадр (кэш), а сам режим пересчитываем,
+	-- если прицеливание могло его поменять.
 	local hatch = ZC_LVS.CanLVSAimCached(ply)
 	local aiming = ZC_LVS.IsAimingLVS(ply)
 	if not hatch and not aiming and ply.zc_lvs_cam_mode and ply.zc_lvs_cam_t == now then
@@ -948,9 +1037,9 @@ function ZC_LVS.CameraMode(ply)
 
 	local mode = "zc"
 	local podRole = ZC_LVS.PodRole(ply, ply:GetVehicle(), veh)
-	-- AIR = ZC camera from the fake's eyes (rule, Oppai 08.10: "фейк
-	-- везде, в авиации нет ничего закрытого"). zc_lvs_air_camera flips the
-	-- rare packs back to the native LVS camera (opt-out, default 0).
+	-- АВИАЦИЯ: по умолчанию камера ZC от глаз фейка (правило Oppai 08.10:
+	-- «фейк везде, в авиации нет ничего закрытого»). Конвар zc_lvs_air_lvcam
+	-- возвращает редкие паки на родную камеру LVS (по умолчанию 0).
 	if ZC_LVS.IsPlane(veh) then
 		if GetConVar("zc_lvs_air_lvcam"):GetBool() then
 			mode = "lvs_plane"
@@ -960,10 +1049,10 @@ function ZC_LVS.CameraMode(ply)
 			mode = "lvs_air"
 		end
 	elseif ZC_LVS.IsClosedVehicle(veh) or ZC_LVS.PodHidesPlayer(ply:GetVehicle()) then
-		-- Closed combat vehicles: the matrix decides (Oppai 06.10).
-		-- Seats with eyes (troop ramp, hatch gunner) = the ZC camera —
-		-- the same body/hands/weapon view the cars have. Seats the pack
-		-- hides (driver behind armor, the whole Abrams) = native LVS.
+		-- Закрытая боевая техника: решает матрица мест. Места с глазами
+		-- (десантный трап, стрелок в люке) получают камеру ZC — тот же
+		-- вид тела/рук/оружия, что у машин. Места, которые пак прячет
+		-- (водитель за бронёй, весь Abrams) — родной вид LVS.
 		local matrix = ZC_LVS.SeatMatrix(ply, ply:GetVehicle(), veh)
 		if matrix.eyes then
 			mode = "zc"
@@ -976,11 +1065,12 @@ function ZC_LVS.CameraMode(ply)
 		mode = "zc"
 	elseif ZC_LVS.SeatEnclosed(ply:GetVehicle(), veh)
 		and (not ZC_LVS.IsCar(veh) or ZC_LVS.CarHasGunSeat(veh)) then
-		-- APC basket is StartSolid. Bukhanka windshield is not, and has no gun seat.
+		-- Корзина БТР даёт StartSolid (мы внутри брони). Лобовое стекло
+		-- буханки — нет, и пулемётного места у неё тоже нет.
 		mode = "lvs_closed"
 	elseif hatch then
-		-- Person in the seat (ref BRDM clip). RMB = LVS sight.
-		-- No unique interior/hands per vehicle.
+		-- Человек в кресле (референс — клип BRDM). ПКМ = прицел LVS.
+		-- Никаких уникальных интерьеров/рук под каждую машину.
 		if aiming then
 			mode = "lvs_gun"
 		else
@@ -1004,8 +1094,9 @@ function ZC_LVS.ShouldUseLVSCamera(ply)
 	return mode == "lvs_air" or mode == "lvs_plane" or mode == "lvs_gun" or mode == "lvs_closed"
 end
 
--- Never replace LVS view/mouse. Fake is body + organism only.
--- Open-MG SeatCamPos followed the ragdoll into the jeep bed.
+-- Нужен ли наш собственный вид (а не ZC и не LVS). Сейчас — только
+-- открытые машины с фейком. Раньше эта функция была выключена совсем,
+-- из-за чего путь airView стал мёртвым кодом.
 function ZC_LVS.ShouldUseOurCamera(ply)
 	if not IsValid(ply) or not ply:InVehicle() then return false end
 	local veh = ZC_LVS.GetVehicle(ply)
@@ -1019,7 +1110,9 @@ function ZC_LVS.ShouldUseZCityCamera(ply)
 	return ZC_LVS.CameraMode(ply) == "zc"
 end
 
--- Hatch / gun / air / tank: LVS weapons + RMB sight. No ZC Z/C selector.
+-- Люк / пушка / авиация / танк: оружие техники и прицел по ПКМ.
+-- Селектор оружия Z-City (клавиши Z/C и слоты) здесь выключаем, иначе
+-- он перехватывает цифры, которыми LVS выбирает вооружение.
 function ZC_LVS.ShouldBlockZCWeapons(ply)
 	if not IsValid(ply) then return false end
 	local mode = ZC_LVS.CameraMode(ply)
@@ -1241,7 +1334,14 @@ ZC_LVS.WEAPON_KEYS = {
 	[KEY_0] = 10,
 }
 
--- Prisoner pods are "chairs" for ZC. LVS cars are real vehicles.
+-- ОБЁРТКИ НАД Z-CITY. Это «договор» мода с Z-City: через них мы говорим
+-- «эту технику не трогай, я разберусь сам». Все обёртки сохраняют
+-- оригинал и вызывают его для всего, что не относится к LVS — чтобы
+-- мод не ломал Glide и прочие аддоны.
+
+-- Для Z-City под — это «стул», а машина LVS — настоящая техника.
+-- Говорим ZC, что наземная техника LVS водится как машина, а авиация —
+-- нет (у неё своё управление).
 if hg and hg.isdriveablevehicle and not ZC_LVS._wrappedDriveable then
 	ZC_LVS._wrappedDriveable = true
 	local oldDriveable = hg.isdriveablevehicle
@@ -1256,17 +1356,19 @@ if hg and hg.isdriveablevehicle and not ZC_LVS._wrappedDriveable then
 	end
 end
 
--- ZC's official "do not auto-Fake in this vehicle". Returning true here
--- stops EnterVehicleRag / Ragdoll_Create parent+weld on LVS pods.
--- We Fake ourselves from PlayerEnteredVehicle.
+-- Официальная точка Z-City «не делай авто-фейк в этой технике».
+-- Возврат true останавливает EnterVehicleRag / Ragdoll_Create, которые
+-- иначе сами парентят и варят регдолл к поду LVS (и ломают всё).
+-- Фейк мы создаём сами из PlayerEnteredVehicle, когда знаем контекст.
+-- Открытые машины — исключение: там штатный путь ZC работает хорошо,
+-- не отбираем его (иначе регдолл оставался лежать на траве).
 ZC_LVS._origNoFakeInCar = ZC_LVS._origNoFakeInCar or (hg and hg.NoFakeInCar)
 if hg and ZC_LVS._origNoFakeInCar then
 	function hg.NoFakeInCar(veh)
 		if ZC_LVS.Enabled() then
-			-- Open cars: ZC EnterVehicleRag / Fake like Glide. Do not steal it.
 			if ZC_LVS.IsLVSSeat(veh) then
 				local chassis = ZC_LVS.GetChassis(veh)
-				-- Hatch uses the same ZC Fake as the driver (clip 17.11).
+				-- Люк использует тот же фейк ZC, что и водитель.
 				if ZC_LVS.IsOpenCarHull(chassis) then
 					return false
 				end
@@ -1287,8 +1389,8 @@ if hg and ZC_LVS._origNoFakeInCar then
 	end
 end
 
--- Aircraft / tank / turret keep LVS camera; open cars keep ZC camera;
--- drones: fully vanilla, block BOTH cameras (the pack screen is the view).
+-- То же для камеры: авиация/танк/турель оставляют вид LVS, открытые
+-- машины — камеру ZC. Дроны блокируют ОБЕ камеры: вид у них — экран пака.
 if hg and hg.NoCameraInCar and not ZC_LVS._wrappedNoCam then
 	ZC_LVS._wrappedNoCam = true
 	local oldNoCam = hg.NoCameraInCar
@@ -1309,7 +1411,7 @@ if hg and hg.NoCameraInCar and not ZC_LVS._wrappedNoCam then
 						if mode == "lvs_air" or mode == "lvs_plane" or mode == "lvs_gun" or mode == "lvs_closed" then
 							return true
 						end
-						-- Open cars: never steal ZC camera (Glide).
+						-- Открытые машины: камеру ZC не отбираем никогда.
 					end
 				elseif ZC_LVS.IsClosedVehicle(chassis) or (LVS_CAMERA_TYPES[ZC_LVS.GetType(chassis)] and GetConVar("zc_lvs_air_lvcam"):GetBool()) then
 					return true
@@ -1320,8 +1422,9 @@ if hg and hg.NoCameraInCar and not ZC_LVS._wrappedNoCam then
 	end
 end
 
--- Occupant fakes are not LVS parts, so the HUD eye-trace hits the lap and
--- the aim circle drops to the bottom of the screen.
+-- Фейки пассажиров не являются частями LVS, поэтому трасса прицела HUD
+-- упиралась в собственные колени и кружок прицела падал вниз экрана.
+-- Добавляем всех сидящих и их регдоллы в фильтр трассы.
 function ZC_LVS.AppendOccupantFilter(veh, list)
 	if not IsValid(veh) or not istable(list) then
 		return list or {veh}

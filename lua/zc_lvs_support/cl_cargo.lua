@@ -1,5 +1,12 @@
--- [Z-CITY] LVS SUPPORT
--- Author: Oppai
+--[[
+	[Z-CITY] LVS SUPPORT — HUD КУЗОВА (клиент)
+	Author: Oppai
+
+	Подсказка «лежит в кузове» и «E — выгрузить» для тел/предметов,
+	которые удерживает sv_interior. Сейчас заглушена (if true then
+	return end в HUDPaint): подсистема кузова выключена, см. sv_cargo.lua.
+	Оставлена рабочей для включения вместе с переделкой кузова.
+]]
 
 ZC_LVS = ZC_LVS or {}
 

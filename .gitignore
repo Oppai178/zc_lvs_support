@@ -1,0 +1,6 @@
+*.gma
+*.rar
+*.zip
+.DS_Store
+CODEX_HISTORY.md
+.claude/worktrees/

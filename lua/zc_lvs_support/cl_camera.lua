@@ -1,35 +1,53 @@
--- [Z-CITY] LVS SUPPORT
--- Author: Oppai
---
--- CAMERA DISPATCH — one order, identical in every wrapper below
--- (hg.CalcViewFake, "!!!!LVS_calcview", "homigrad-view"):
---   mode "zc"  → the ORIGINAL Z-City camera. We return no view of our own
---                on this path, so nothing here can mute ZC's own
---                drawviewer / viewmodel decisions.
---   mode lvs_* → vanillaLVSView: native LVS view plus the pelvis-cam /
---                seat-pan fixes. zc_lvs_air_lvcam=1 is the opt-out convar
---                that flips aircraft onto this path (default 0 = ZC eyes).
---   The "zc" exceptions are the MOUSE and the PILOT VIEW (InputMouseApply
---   + wrapCalcViewFake): in aviation the pilot's mouse must feed the LVS
---   stick (and stock LVS FREELOOK) and his camera IS EyeAngles (1:1 with
---   the stick, LVS heli PlayerMouseAim reads EyeAngles); plain passengers
---   turn the head the ZC way and keep the ZC fake cam.
--- airView / waitCarView / waitingCarCam / airMouse are DEAD paths since the
--- "zc"-first dispatch (ShouldUseOurCamera requires mode "zc", which
--- ShouldUseZCityCamera already matched first). Kept below, commented, for
--- history — do not route anything new through them.
+--[[
+	[Z-CITY] LVS SUPPORT — КАМЕРА И МЫШЬ (клиент)
+	Author: Oppai
+
+	ДИСПЕТЧЕР КАМЕРЫ. Порядок один и тот же во всех обёртках ниже
+	(hg.CalcViewFake, "!!!!LVS_calcview", "homigrad-view"):
+
+	  режим "zc"  -> ОРИГИНАЛЬНАЯ камера Z-City. Свой вид здесь не
+	                 возвращаем вообще, чтобы не задавить решения ZC
+	                 о drawviewer / вьюмодели (руки, оружие).
+	  режим lvs_* -> vanillaLVSView: родной вид LVS плюс починка
+	                 «камера в тазу» и «камера в сидушке».
+	                 Конвар zc_lvs_air_lvcam=1 переводит авиацию сюда
+	                 (по умолчанию 0 = глаза ZC).
+
+	ИСКЛЮЧЕНИЯ ДЛЯ АВИАЦИИ (мышь и вид пилота):
+	  мышь пилота обязана кормить штурвал LVS (и штатный FREELOOK),
+	  а его камера — это EyeAngles один-в-один со штурвалом:
+	  вертолётный PlayerMouseAim читает именно EyeAngles.
+	  Обычный пассажир штурвала не имеет: он крутит головой по-ZC
+	  и сохраняет камеру фейка.
+
+	МЁРТВЫЕ ПУТИ: airView / waitCarView / waitingCarCam / airMouse
+	остались от старой архитектуры и недостижимы при текущем
+	диспетчере. Оставлены закомментированными для истории —
+	ничего нового через них не пускать.
+
+	ПОЧЕМУ ОБОРАЧИВАЕМ ТРИ ХУКА
+	  Z-City рисует камеру через hg.CalcViewFake внутри своего
+	  "homigrad-view", а LVS — через "!!!!LVS_calcview". Если перехватить
+	  только один, второй перезапишет вид. Поэтому все три, и порядок
+	  проверок в них идентичен.
+]]
 
 ZC_LVS = ZC_LVS or {}
 
--- World-up from the pod origin. Pod local axes differ per LVS pack;
--- Vector(0,0,30) in pod-space was the seat pan on some trucks.
+-- Высоты глаз считаем В МИРОВЫХ координатах от пода, а не в локальных:
+-- паки LVS поворачивают поды как угодно, и Vector(0,0,30) в pod-space
+-- на некоторых грузовиках оказывался сидушкой или днищем.
 local SEAT_EYE_WORLD_Z = 32
 local STAND_EYE_WORLD_Z = 64
+-- Насколько далеко глаза фейка могут быть от пода, чтобы ещё считаться
+-- «сидит в этом кресле». Дальше — тело уехало, берём запасную точку.
 local EYE_NEAR_SEAT = 72 * 72
 local EYE_NEAR_STAND = 110 * 110
 
--- Prisoner pod sits inside tank armor. Vanilla LVS first-person then
--- looks into the mantlet (black plate). Climb world-up out of the hull.
+-- Под танка стоит внутри брони, и родной вид от первого лица смотрит
+-- в маску орудия (чёрная плита). Поднимаемся вверх шагами, пока не
+-- выйдем из корпуса. Фильтр трассы намеренно пускает только сам корпус
+-- и его детали — регдоллы и поды не считаем препятствием.
 local function closedHatchPos(pod, veh)
 	if not IsValid(pod) then return vector_origin end
 	local start = pod:GetPos()
@@ -49,6 +67,8 @@ local function closedHatchPos(pod, veh)
 		return tr.StartSolid
 	end
 	local p = start + Vector(0, 0, 8)
+	-- 14 шагов по 8 юнитов = 112, хватает на любой корпус. Если всё ещё
+	-- внутри (кривая модель) — уходим на фиксированные 64 вверх.
 	for _ = 1, 14 do
 		if not inHull(p) then
 			return p + Vector(0, 0, 28)

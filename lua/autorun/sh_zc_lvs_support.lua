@@ -1,12 +1,58 @@
 --[[
-	[Z-CITY] LVS SUPPORT
+	[Z-CITY] LVS SUPPORT — загрузчик
 	Author: Oppai
-	Compatibility layer: LVS vehicles use Z-City fake/organism/TPIK.
-	Does not replace Glide. Does not patch Z-City files.
+
+	ЧТО ЭТО ЗА МОД
+	  Z-City (Homigrad) и LVS — две несовместимые системы. В Z-City игрок —
+	  это регдолл с организмом (кости, кровь, отключка), а в LVS техника —
+	  это шасси с подом, где игрок просто невидимая точка. Посади одно в
+	  другое — и всё ломается: Z-City выкидывает игрока, урон не доходит до
+	  организма, камера уезжает в сиденье.
+
+	  Этот мод — прослойка между ними. Он НЕ патчит ни Z-City, ни LVS, а
+	  встраивается через хуки и обёртки функций. Референс поведения — ArmA
+	  Reforger: посадка в технику = настоящее тело внутри объёма, по тебе
+	  попадает через стекло, при аварии травмы, в отрубе можно вытащить.
+
+	ТРИ НЕЗАВИСИМЫХ СЛОЯ (главный принцип, не смешивать):
+	  1. УПРАВЛЕНИЕ — кто рулит машиной. Всегда живой игрок в поде LVS.
+	  2. КАМЕРА     — откуда смотрим. Открытая машина = глаза Z-City,
+	                  авиация/броня = вид LVS. Решает ZC_LVS.CameraMode.
+	  3. ТЕЛО/УРОН  — фейк-регдолл как хитбокс организма. Есть почти на
+	                  каждом месте, но НЕ обязан совпадать с камерой.
+
+	ПОРЯДОК ЗАГРУЗКИ
+	  Мод ждёт, пока появятся обе таблицы: LVS и hg (Z-City). Пока их нет —
+	  печатает "waiting for" и повторяет раз в секунду. Как только обе есть,
+	  грузит модули в порядке: shared -> server -> client. Каждый include
+	  обёрнут в pcall: если один файл сломан, остальные всё равно загрузятся,
+	  а в консоль уйдёт понятная ошибка с именем файла (раньше битый файл
+	  молча убивал весь мод).
+
+	Файлы:
+	  sh_core.lua      — ядро: классификация техники, CameraMode, матрица мест
+	  sh_binds.lua     — общие бинды (Alt+цифра = смена места)
+	  sv_seats.lua     — фейк-регдоллы: посадка, сварки, выход, отключка
+	  sv_organism.lua  — урон: ДТП, пробитие, броня, топливо, пожар
+	  sv_he.lua        — HE-снаряды LVS через взрывной конвейер Z-City
+	  sv_interior.lua  — удержание тел/пропов внутри кузова
+	  sv_cargo.lua     — посадка в кузов (сейчас выключена)
+	  sv_forceseat.lua — принудительная посадка других игроков (выключена)
+	  cl_camera.lua    — камера и мышь для всех режимов
+	  cl_tpik.lua      — руки на руль (TPIK)
+	  cl_binds.lua     — клиентские бинды LVS
+	  cl_cargo.lua     — HUD подсказка кузова
+	  cl_forceseat.lua — пункты радиального меню для посадки
+
+	ВАЖНО ПРИ ПРАВКАХ
+	  Никогда не делать SetPos регдоллу, у которого есть parent (движок
+	  GMod считает это локальной координатой и выкидывает тело в космос —
+	  "Crazy origin", после чего движок удаляет и регдолл, и шасси).
+	  Никогда не варить живого водителя к корпусу. Подробнее — в CLAUDE.md.
 ]]
 
 ZC_LVS = ZC_LVS or {}
-ZC_LVS.Version = "4.1.0"
+ZC_LVS.Version = "4.2.0"
 
 if SERVER then
 	AddCSLuaFile("zc_lvs_support/sh_core.lua")
@@ -53,15 +99,19 @@ local function includeList(list)
 end
 
 function ZC_LVS.Load()
-	-- A version string avoids old boolean state skipping files after a refresh.
+	-- Сравниваем с ВЕРСИЕЙ, а не с true: при обновлении файлов на живом
+	-- сервере старый булев флаг пропускал новые модули.
 	if ZC_LVS._loaded == ZC_LVS.Version then return true end
 	if ZC_LVS._loading then return false end
 
+	-- Ждём обе системы. LVS и Z-City грузятся в произвольном порядке,
+	-- поэтому этот таймер повторяется, пока обе таблицы не появятся.
 	local missing = {}
 	if not LVS then missing[#missing + 1] = "LVS" end
 	if not hg then missing[#missing + 1] = "hg" end
 	if #missing > 0 then
 		local reason = table.concat(missing, ", ")
+		-- Печатаем только при смене состояния, иначе консоль забьётся.
 		if ZC_LVS._lastLoadState ~= reason then
 			print("[Z-CITY LVS SUPPORT] waiting for: " .. reason)
 			ZC_LVS._lastLoadState = reason
@@ -70,6 +120,8 @@ function ZC_LVS.Load()
 	end
 
 	ZC_LVS._loading = true
+	-- Флаги обёрток сбрасываем: модули пере-оборачивают функции при
+	-- каждой загрузке, и старый флаг заблокировал бы повторную обёртку.
 	ZC_LVS._wrappedSetPos = nil
 	ZC_LVS._wrappedRemoveDead = nil
 
@@ -85,6 +137,8 @@ function ZC_LVS.Load()
 	ZC_LVS._loading = nil
 
 	if not ok then
+		-- Не помечаем как загруженное: таймер попробует снова, а имя
+		-- битого файла уже ушло в консоль через ErrorNoHalt.
 		ZC_LVS._lastLoadState = "include:" .. tostring(path)
 		return false
 	end
@@ -95,9 +149,9 @@ function ZC_LVS.Load()
 	return true
 end
 
--- One-shot state snapshot of a player's LVS seat. Works even while the
--- compatibility layer is still waiting for LVS/hg, so a broken load is
--- diagnosable too. SERVER prints everyone; CLIENT prints the local player.
+-- Снимок состояния места игрока для диагностики (zc_lvs_debug_seats).
+-- Работает даже когда мод ещё не загрузился — чтобы можно было понять,
+-- почему он не грузится. На сервере печатает всех, на клиенте — себя.
 local function seatSnapshot(ply)
 	local lines = {}
 	local function add(fmt, ...)
@@ -183,6 +237,11 @@ local function seatSnapshot(ply)
 	return lines
 end
 
+-- ДИАГНОСТИКА: zc_lvs_debug_seats [часть ника]
+-- Печатает всё, что мод знает о месте игрока: pod/chassis, режим камеры,
+-- роль (водитель/стрелок/пассажир), есть ли фейк, где камера.
+-- Это главный инструмент отладки по чужим пакам: если техника ведёт себя
+-- странно, снимок сразу показывает, в какую ветку классификации она попала.
 concommand.Add("zc_lvs_debug_seats", function(ply, cmd, args)
 	if SERVER and IsValid(ply) and not ply:IsAdmin() then return end
 
@@ -236,6 +295,9 @@ concommand.Add("zc_lvs_status", function(ply)
 	))
 end)
 
+-- Четыре независимых триггера загрузки. Порядок появления LVS и Z-City
+-- не гарантирован, поэтому ловим все возможные моменты и страховочный
+-- таймер. Load() идемпотентна — лишние вызовы просто вернут true.
 timer.Create("zc_lvs_support_load_retry", 1, 0, function()
 	if ZC_LVS._loaded ~= ZC_LVS.Version then
 		ZC_LVS.Load()
@@ -257,7 +319,4 @@ hook.Add("InitPostEntity", "zc_lvs_support", function()
 end)
 
 timer.Simple(0, ZC_LVS.Load)
-
-
-
 

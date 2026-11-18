@@ -1,13 +1,26 @@
 --[[
-	[Z-CITY] LVS SUPPORT
+	[Z-CITY] LVS SUPPORT — ПРИНУДИТЕЛЬНАЯ ПОСАДКА (сервер)
 	Author: Oppai
 
-	Force seat: put another player (knocked out / tied / willing) into an
-	LVS vehicle and pull them out. ArmA-style drag & load.
+	Идея: посадить другого игрока в технику и вытащить его оттуда —
+	в том числе связанного (активен фейк) или в отрубе.
+	Референс — ArmA / ACE drag & carry.
 
-	Server part: net handler + guards. The forced seat flag bypasses our
-	own CanPlayerEnterVehicle blocker (enter_block_fake) for one action.
-	Disabled by default (zc_lvs_forceseat 0) until verified.
+	Серверная часть: net-приёмник + проверки. Клиентское меню —
+	cl_forceseat.lua (пункты радиалки Z-City).
+
+	Флаг zc_lvs_force_seat на одно действие обходит НАШ блокиратор
+	CanPlayerEnterVehicle (enter_block_fake), который иначе не пускает
+	игрока с активным фейком в технику. Флаг гаснет сразу после посадки.
+
+	ВЫКЛЮЧЕНО ПО УМОЛЧАНИЮ (zc_lvs_forceseat 0) — каркас собран, но не
+	проверен в игре. Что доделать перед включением (см. TODO.md):
+	  - согласие живого игрока (сейчас сажает без спроса);
+	  - подтащить регдолл к машине (сейчас цель должна быть рядом);
+	  - выбор конкретного места (сейчас глаз-трасса -> первое свободное).
+
+	Все проверки серверные: живой инициатор, пустые руки, дистанции,
+	место свободно, цель — техника LVS. Клиентскому меню не доверяем.
 ]]
 
 ZC_LVS = ZC_LVS or {}

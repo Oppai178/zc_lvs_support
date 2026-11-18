@@ -1,2 +1,10 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Normalise line endings so a Windows checkout and a Linux CI agree.
+* text=auto eol=lf
+
+# Lua: LF only. CRLF in a Lua string literal can break the parser.
+*.lua text eol=lf
+
+# Workshop assets are binary.
+*.jpg binary
+*.png binary
+*.gma binary

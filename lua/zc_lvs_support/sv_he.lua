@@ -1,9 +1,40 @@
--- [Z-CITY] LVS SUPPORT
--- Author: Oppai
--- LVS HE / splash / bombs use the REAL Z-City explosion pipeline:
--- grenade-style shrapnel (FireLuaBullets "Metal Debris"), grenade
--- detonate sound (net "projectileFarSound"), jack-airsplode particles.
--- Does not patch LVS files. Wraps LVS:BlastDamage.
+--[[
+	[Z-CITY] LVS SUPPORT — HE-СНАРЯДЫ (сервер)
+	Author: Oppai
+
+	Что делает: когда LVS взрывает HE-снаряд, бомбу или мину, поверх
+	родного урона LVS проигрывается НАСТОЯЩИЙ взрывной конвейер Z-City:
+	осколки, звук детонации гранаты, частицы jack-airsplode, тряска
+	экрана, след копоти. Файлы LVS не патчатся — оборачивается
+	LVS:BlastDamage.
+
+	КАК УСТРОЕН УРОН LVS (важно понимать, прочитано в исходниках
+	lvs_framework/init.lua:79 и lvs_bulletsystem.lua)
+
+	  1. Орудие/бомба зовёт LVS:BlastDamage(pos, dir, attacker, inflictor,
+	     damage, damagetype, radius, force).
+	  2. Внутри LVS ПЕРЕКЛЮЧАЕТ DMG_BLAST -> DMG_SONIC и применяет
+	     util.BlastDamageInfo по сфере.
+	  3. Затем 16 трасс «осколков» + обход техники в сфере: каждому
+	     попавшему LVS-энтити наносится DMG_BLAST, пересчитанный по числу
+	     попаданий (DamageBoost).
+
+	  Отсюда два следствия, из-за которых раньше ломалось:
+	    - inflictor/attacker это НЕ шасси: у снаряда это lvs_base_gunner
+	      (у него LVS_GUNNER, но НЕТ .LVS), у бомбы — сама бомба
+	      (lvsProjectile). Поэтому любой фильтр по src.LVS молча не
+	      срабатывал. Разбор цепочки — см. lvsRoot в sv_organism.lua.
+	    - до наших хуков урон приходит как DMG_SONIC, а не DMG_BLAST.
+
+	ОТКУДА БЕРУТСЯ ОСКОЛКИ Z-CITY
+	  Это копия механики F1/RGN (ent_hg_grenade/init.lua): FireLuaBullets
+	  с AmmoType "Metal Debris" (sh_ammostuff.lua: Damage 16, Speed 700,
+	  Penetration 8), направление — полусфера со смещением вверх,
+	  QuickTrace-фильтр (осколок летит только если в этой стороне есть
+	  энтити), а чтобы не подвесить сервер — корутина в общей таблице
+	  Z-City APScheduledExplosions (её разгоняет Think-хук самого ZC).
+	  Если таблицы нет (чистый ZC другого билда) — сливаем синхронно.
+]]
 
 ZC_LVS = ZC_LVS or {}
 
@@ -28,11 +59,11 @@ local SND_FAR = {
 }
 local SND_WATER = "m67/water/m67_water_detonate_01.wav"
 
--- Native Z-City shrapnel (the F1/RGN grenade mechanic, mirror of
--- ent_hg_grenade/init.lua ENT:Explode -> FireLuaBullets coroutine):
--- random hemisphere-biased dirs, QuickTrace gate (only entities get a
--- fragment, world/sky rays are skipped), ammo "Metal Debris"
--- (sh_ammostuff.lua: Speed 700, Penetration 8).
+-- Осколки по механике гранаты Z-City. Зеркало
+-- ent_hg_grenade/init.lua ENT:Explode -> корутина FireLuaBullets.
+-- Направления — случайная полусфера со смещением вверх, QuickTrace-
+-- фильтр (осколок летит только в сторону энтити, не в небо/землю),
+-- боеприпас "Metal Debris" (Speed 700, Penetration 8 в sh_ammostuff.lua).
 local function zcShrapnel(pos, attacker, inflictor, fragments, fragDamage, fragDistance, fragPen, filter)
 	local world = game.GetWorld()
 	if not isfunction(world.FireLuaBullets) then return end
@@ -42,7 +73,7 @@ local function zcShrapnel(pos, attacker, inflictor, fragments, fragDamage, fragD
 	bullet.Spread = vector_origin
 	bullet.Force = 20
 	bullet.Damage = fragDamage
-	bullet.Speed = 700 -- "Metal Debris" BulletSettings.Speed, as the grenade uses
+	bullet.Speed = 700 -- BulletSettings.Speed у "Metal Debris", как у гранаты
 	bullet.Penetration = fragPen
 	bullet.AmmoType = "Metal Debris"
 	bullet.Attacker = IsValid(attacker) and attacker or world
@@ -50,8 +81,10 @@ local function zcShrapnel(pos, attacker, inflictor, fragments, fragDamage, fragD
 	bullet.Distance = fragDistance
 	bullet.DisableLagComp = true
 	bullet.Filter = filter
-	bullet.TraceFilter = filter -- phys_bullets path reads TraceFilter
+	bullet.TraceFilter = filter -- путь phys_bullets читает именно TraceFilter
 	bullet.IgnoreEntity = filter[1]
+	-- hg.bulletHit — обработчик попаданий ZC (ранения, кровь). Без него
+	-- осколок нанесёт голый урон без органики.
 	if isfunction(hg.bulletHit) then
 		bullet.Callback = hg.bulletHit
 	end
@@ -61,16 +94,20 @@ local function zcShrapnel(pos, attacker, inflictor, fragments, fragDamage, fragD
 		for _ = 1, fragments do
 			lastShrapnel = SysTime()
 
+			-- Полусфера со смещением вверх — как у гранаты ZC.
 			local dir = VectorRand(-1, 1):GetNormalized()
 			dir.z = dir.z > 0 and math.abs(dir.z - 0.5) or -math.abs(dir.z + 0.5)
 			dir:Normalize()
 
+			-- Осколок летит только если в этой стороне есть энтити.
 			local tr = util.QuickTrace(pos, dir * 10000, filter)
 			if tr.Hit and not tr.HitSky and not tr.HitWorld then
 				bullet.Dir = dir
 				pcall(world.FireLuaBullets, world, bullet, true)
 			end
 
+			-- Отдаём управление, если пачка заняла больше 1 мс — иначе
+			-- 900 осколков подвесили бы сервер на кадр.
 			lastShrapnel = SysTime() - lastShrapnel
 			if lastShrapnel > 0.001 then
 				coroutine.yield()
@@ -78,9 +115,9 @@ local function zcShrapnel(pos, attacker, inflictor, fragments, fragDamage, fragD
 		end
 	end)
 
-	-- Entity-less scheduling, exactly like Z-City's explosive ammo
-	-- (sh_ammostuff.lua APScheduledExplosions Think hook). Fallback:
-	-- drain synchronously if Z-City's table is missing.
+	-- Планирование без сущности — ровно как у взрывных боеприпасов Z-City
+	-- (sh_ammostuff.lua, Think-хук APScheduledExplosions). Если таблицы
+	-- нет (другой билд ZC), сливаем корутину синхронно.
 	if istable(APScheduledExplosions) then
 		coCounter = coCounter + 1
 		local id = "zc_lvs_he_" .. coCounter
@@ -93,21 +130,24 @@ local function zcShrapnel(pos, attacker, inflictor, fragments, fragDamage, fragD
 	end
 end
 
+-- Главная функция взрыва. Вызывается из обёртки LVS:BlastDamage.
+-- Порядок: контузия экипажа -> контузия стоящих рядом -> осколки -> FX.
+-- Контузия идёт ДО проверки FX-конвара: это урон, а не косметика.
 local function zcHeBoom(pos, radius, damage, attacker, inflictor)
 	if not isvector(pos) then return end
 	radius = tonumber(radius) or 0
 	damage = tonumber(damage) or 0
-	-- SMALL CALIBER (Oppai, asked 10x): 20mm autocannons and other light
-	-- HE (radius < 48 AND damage < 25) get the REAL Z-City grenade
-	-- explosion at RGN scale — native shrapnel mechanic included.
-	-- Big shells run the SAME Z-City pipeline, only the scale differs.
+	-- МАЛЫЙ КАЛИБР: 20-мм автопушки и прочий лёгкий HE (radius < 48 и
+	-- damage < 25) получают полноценный взрыв Z-City в масштабе РГН,
+	-- включая родную механику осколков. Крупные снаряды идут по тому же
+	-- конвейеру, отличается только масштаб.
 	local small = radius < 48 and damage < 25
-	if radius < 12 and damage < 5 then return end -- bullet-impact dust, not HE
+	if radius < 12 and damage < 5 then return end -- пыль от попадания пули, не HE
 
 	local now = CurTime()
-	-- Spam filter: an autocannon burst walks its impacts across ground /
-	-- targets, so only SAME-POSITION repeats inside the window are eaten.
-	-- 0.12s small / 0.04s big, per pos — a queue never loses every boom.
+	-- Фильтр спама: очередь автопушки раскладывает попадания по земле и
+	-- целям, поэтому гасим только повтор В ОДНОЙ ТОЧКЕ внутри окна
+	-- (0.12 с малый / 0.04 с крупный). Очередь не теряет все взрывы сразу.
 	local spamT = small and 0.12 or 0.04
 	if now - lastBoom < spamT and lastPos:DistToSqr(pos) < 64 * 64 then
 		return
@@ -115,14 +155,16 @@ local function zcHeBoom(pos, radius, damage, attacker, inflictor)
 	lastBoom = now
 	lastPos = pos
 
+	-- Радиус поражения контузией — не меньше разумного, иначе осколок
+	-- 20-мм снаряда никого не задевал.
 	local reach = math.max(radius, small and 90 or 120)
 
-	-- HE near armor: ZC disorientation only touches entities the sphere
-	-- sees directly. Seated players inside a closed hull (their fake is
-	-- parented under the hull) never pass that FindInSphere test.
-	-- Route the concussion through the hull with an armor cut. Runs even
-	-- with FX off: this is damage, not cosmetics. (No AddForceRag on
-	-- seated fakes — parented ragdolls never get velocities, per contract.)
+	-- HE рядом с бронёй. Контур контузии Z-City трогает только те сущности,
+	-- которые сфера видит напрямую; сидящие в закрытом корпусе (их фейк
+	-- припарентован под корпусом) этот FindInSphere не проходят. Поэтому
+	-- контузию доводим до экипажа через корпус со скидкой на броню.
+	-- AddForceRag сидячим фейкам не зовём намеренно: припарентованный
+	-- регдолл скорости не получает, это ломало физику корпуса.
 	if hg then
 		for _, veh in ipairs(ents.FindInSphere(pos, reach)) do
 			if not IsValid(veh) or not veh.LVS then continue end
@@ -134,13 +176,15 @@ local function zcHeBoom(pos, radius, damage, attacker, inflictor)
 			ZC_LVS.IterOccupants(veh, function(ply)
 				local org = ply.organism
 				if not org then return end
-				-- Closed armor soaks the blast: weaker shake, no concussion.
+				-- Закрытая броня гасит взрыв: слабее тряска, без контузии.
 				local scale = closed and 0.25 or 1
 				if small then scale = scale * 0.5 end
 				org.disorientation = math.min((org.disorientation or 0) + 5 * frac * scale, 8)
 				if isfunction(ply.AddTinnitus) then
 					ply:AddTinnitus(4 * frac * scale)
 				end
+				-- Ближний разрыв открытого корпуса крупным снарядом валит
+				-- в отключку. Уже отключённого не трогаем.
 				if not closed and not small and frac > 0.45 and not ZC_LVS.IsUnconscious(ply) then
 					org.needotrub = true
 				end
@@ -163,30 +207,35 @@ local function zcHeBoom(pos, radius, damage, attacker, inflictor)
 		end
 	end
 
-	-- Shrapnel filter: never frag the shooter or his own weapon/vehicle.
+	-- Фильтр осколков: стрелок и его собственное орудие/техника не должны
+	-- получать свои же осколки.
 	local filter = {}
 	if IsValid(attacker) then filter[#filter + 1] = attacker end
 	if IsValid(inflictor) and inflictor ~= attacker then filter[#filter + 1] = inflictor end
 
 	if GetConVar("zc_lvs_shrapnel"):GetBool() then
-		-- F1 grenade = 300*3 fragments (ent_hg_grenade/shared.lua:13).
-		-- Small caliber = RGN scale 0.55; big shells scale with radius.
+		-- Граната F1 = 300*3 осколков (ent_hg_grenade/shared.lua:13).
+		-- Малый калибр = масштаб РГН 0.55, крупные снаряды растут с радиусом.
 		local scale = small and 0.55 or math.Clamp(radius / 110, 0.9, 1.5)
 		local fragments = math.Round((small and 450 or 900) * scale)
-		local fragDamage = small and 12 or 40 -- grenade shrapnel bullet.Damage (small cut: direct LVS dmg already lands)
+		-- У малых урон осколка срезан: прямой урон LVS по ним уже прошёл.
+		local fragDamage = small and 12 or 40
 		local fragDistance = small and 700 or 2500
-		local fragPen = small and 5 or 8 -- grenade Penetration
+		local fragPen = small and 5 or 8 -- Penetration как у гранаты
 		zcShrapnel(pos, attacker, inflictor, fragments, fragDamage, fragDistance, fragPen, filter)
 	end
 
+	-- Дальше только косметика: её можно выключить конваром.
 	if not GetConVar("zc_lvs_he_fx"):GetBool() then return end
 
-	-- Water check (grenade uses WaterLevel; we have no entity, so sample
-	-- the position itself).
+	-- Проверка воды: граната смотрит WaterLevel сущности, у нас сущности
+	-- нет — проверяем содержимое самой точки.
 	local inWater = bit.band(util.PointContents(pos), MASK_WATER) ~= 0
 
-	-- Grenade detonate sound through Z-City's own receiver: near + far
-	-- variants with real distance delay (entities/projectile_base.lua:317).
+	-- Звук детонации через собственный приёмник Z-City: ближний и дальний
+	-- варианты с настоящей задержкой по расстоянию
+	-- (entities/projectile_base.lua:317). Порядок полей важен — приёмник
+	-- читает их именно так.
 	pcall(function()
 		net.Start("projectileFarSound")
 		net.WriteString(SND_NEAR[math.random(#SND_NEAR)])
@@ -198,10 +247,9 @@ local function zcHeBoom(pos, radius, damage, attacker, inflictor)
 		net.SendPVS(pos)
 	end)
 
-	-- Z-City boom particles: grenade's airsplode_small3 for small calibers,
-	-- projectile_base's airsplode_medium for big shells; water gets the
-	-- generic boom. Registered by Z-City itself
-	-- (entities/projectile_base.lua:28-30 game.AddParticles).
+	-- Частицы взрыва Z-City: airsplode_small3 для малых калибров,
+	-- airsplode_medium (из projectile_base) для крупных, в воде — общий
+	-- взрыв. Зарегистрированы самим Z-City (game.AddParticles).
 	pcall(function()
 		if inWater then
 			local ed = EffectData()
@@ -212,7 +260,7 @@ local function zcHeBoom(pos, radius, damage, attacker, inflictor)
 		else
 			ParticleEffect(small and "pcf_jack_airsplode_small3" or "pcf_jack_airsplode_medium", pos, -vector_up:Angle())
 		end
-		-- Secondary frag flash, same as the grenade's Poof.
+		-- Вторичная вспышка осколков, как Poof у гранаты.
 		local poof = EffectData()
 		poof:SetOrigin(pos)
 		poof:SetScale(1.2)
@@ -221,8 +269,8 @@ local function zcHeBoom(pos, radius, damage, attacker, inflictor)
 
 	util.ScreenShake(pos, 35, 200, 1, small and 600 or 2000)
 
-	-- Scorch decal for the big stuff only (autocannon spam would tattoo
-	-- the whole map); one trace down, one decal.
+	-- След копоти только для крупного: очередь автопушки иначе зататуирует
+	-- всю карту. Одна трасса вниз, один декаль.
 	if not small then
 		local tr = util.QuickTrace(pos, -vector_up * 500, filter)
 		if tr.Hit then
@@ -231,6 +279,10 @@ local function zcHeBoom(pos, radius, damage, attacker, inflictor)
 	end
 end
 
+-- Обёртка над LVS:BlastDamage. Сначала даём LVS нанести свой урон
+-- (иначе HE перестанет пробивать корпуса вообще), затем добавляем наш
+-- конвейер. Флаг _wrappedBlast защищает от двойной обёртки при
+-- перезагрузке файлов на живом сервере.
 local function wrapBlast()
 	if not LVS or ZC_LVS._wrappedBlast then return end
 	local old = LVS.BlastDamage
