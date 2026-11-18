@@ -7,7 +7,12 @@
 		"*.md",
 		"*.txt",
 		".git/*",
+		".gitattributes",
+		".gitignore",
+		".claude/*",
+		"tools/*",
 		"*.psd",
+		"*.py",
 		"workshop/*"
 	]
 }
